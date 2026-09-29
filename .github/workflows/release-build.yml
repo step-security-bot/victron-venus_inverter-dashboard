@@ -66,7 +66,7 @@ jobs:
     - name: Verify committed release version
       run: python3 scripts/check-release-version.py "$RELEASE_VERSION" "$RELEASE_CHANNEL"
     - name: Set up uv
-      uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
       with:
         version: 0.12.7
     - name: Install locked dependencies
