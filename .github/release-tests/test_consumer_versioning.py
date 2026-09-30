@@ -44,7 +44,7 @@ class ConsumerVersioningTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         (self.root / "scripts").mkdir()
-        for script in ("version_plan.py", "version_receipt.py"):
+        for script in ("release_control.py", "version_plan.py", "version_receipt.py"):
             shutil.copy2(SCRIPTS / script, self.root / "scripts" / script)
         self.policy = {
             "repository": "example/consumer",

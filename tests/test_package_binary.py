@@ -19,7 +19,12 @@ def checkout(tmp_path):
     root = tmp_path / "checkout"
     (root / "scripts").mkdir(parents=True)
     (root / "dist").mkdir()
-    for name in ("package_binary.py", "version_receipt.py", "version_plan.py"):
+    for name in (
+        "package_binary.py",
+        "version_receipt.py",
+        "version_plan.py",
+        "release_control.py",
+    ):
         shutil.copy2(REPO / "scripts" / name, root / "scripts" / name)
     (root / "VERSION").write_text("1.2.3-beta.4\n")
     (root / "dist/inverter-dashboard").write_bytes(b"fixture executable")

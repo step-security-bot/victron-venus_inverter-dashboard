@@ -113,8 +113,16 @@ the installed scripts; Git metadata, symlink escapes and existing output files
 are rejected. The receipt also rechecks declared source-file hashes after packaging.
 It records installed compiler/runtime versions and GitHub runner image identifiers
 per platform; final-build compares
-these with the accepted RC and rejects toolchain drift. Floating runner/toolchain
-updates therefore require a fresh RC instead of silently changing final inputs.
+these with the accepted RC and rejects toolchain drift. Failure diagnostics cover
+all platform receipts in deterministic order, with field paths, missing fields
+and changed types; receipt values are withheld. Diagnostics show at most 100 field
+differences, count any omitted differences, and redact unsafe or oversized labels.
+Receipt inventory, byte integrity and JSON failures still stop verification.
+Floating runner image rollouts can give successive jobs different `ImageVersion`
+values, so a new RC alone does not guarantee matching final-build inputs. Inspect
+the verified RC and final receipts and runner/toolchain availability before
+starting another RC/final cycle. Exact equality remains required for publication;
+the diagnostic does not permit dropping fields or overriding the receipt.
 It additionally reads all metadata targets declared in `versioning.artifacts`;
 each declared pattern must match a real package in the complete matrix.
 

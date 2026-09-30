@@ -29,6 +29,55 @@ from release_state import (
 from version_receipt import verify_declared_artifacts, verify_receipts
 
 PLAN = Path(".release-plan.json")
+MAX_TOOLCHAIN_DIAGNOSTICS = 100
+
+
+def diagnostic_label(value):
+    """Keep receipt names/field paths bounded and free of log control syntax."""
+    if re.fullmatch(r"[A-Za-z0-9_./~-]{1,200}", value, re.ASCII):
+        return value
+    return "redacted-sha256-" + rc.digest(value.encode("utf-8", "surrogatepass"))
+
+
+def toolchain_changes(original, current):
+    """Describe unequal JSON fields deterministically without logging values."""
+    missing = object()
+    pending = [("toolchain", original, current)]
+    while pending:
+        path, before, after = pending.pop()
+        if before is missing:
+            yield path, "missing in accepted RC"
+        elif after is missing:
+            yield path, "missing in final build"
+        elif before == after:
+            continue
+        elif type(before) is not type(after):
+            yield (
+                path,
+                f"type changed ({type(before).__name__} -> {type(after).__name__})",
+            )
+        elif isinstance(before, dict):
+            for key in sorted(before.keys() | after.keys(), reverse=True):
+                pending.append(
+                    (
+                        diagnostic_label(
+                            path + "/" + key.replace("~", "~0").replace("/", "~1")
+                        ),
+                        before.get(key, missing),
+                        after.get(key, missing),
+                    )
+                )
+        elif isinstance(before, list):
+            for index in reversed(range(max(len(before), len(after)))):
+                pending.append(
+                    (
+                        diagnostic_label(f"{path}/{index}"),
+                        before[index] if index < len(before) else missing,
+                        after[index] if index < len(after) else missing,
+                    )
+                )
+        else:
+            yield path, "value changed"
 
 
 def context(gh, channel, gate=False):
@@ -36,11 +85,8 @@ def context(gh, channel, gate=False):
     run_id = rc.positive(os.environ.get("GITHUB_RUN_ID"), "run ID")
     attempt = rc.positive(os.environ.get("GITHUB_RUN_ATTEMPT"), "run attempt")
     info = rc.repository_info(gh)
-    run = gh.api(f"actions/runs/{run_id}")
-    rc.require(run.get("id") == run_id, "Execution run identity mismatch")
-    rc.check_execution(gh, run_id, channel, info, run)
-    rc.validate_run(
-        gh, run, info, run.get("head_sha", ""), attempt, completed=False, gate=gate
+    run = rc.wait_for_executing_run(
+        gh, run_id, channel, info, rc.checked_out_sha(), attempt, gate=gate
     )
     snapshot = rc.source_policy_snapshot(gh, run["head_sha"])
     rc.require_release_policy(
@@ -105,18 +151,19 @@ def verified_rc(gh, tag, info, current_run):
         {item["name"] for item in assets} == set(expected) | {rc.MANIFEST},
         "RC asset inventory differs from immutable evidence",
     )
-    for item in assets:
-        data = (
-            raw
-            if item["name"] == rc.MANIFEST
-            else gh.binary(f"releases/assets/{rc.positive(item['id'], 'asset ID')}")
-        )
-        rc.require(item["size"] == len(data), "RC asset size mismatch")
-        if item["name"] != rc.MANIFEST:
+    rc.require(manifests[0]["size"] == len(raw), "RC asset size mismatch")
+    with tempfile.TemporaryDirectory(prefix="verified-rc-") as temp:
+        payload = Path(temp) / "payload"
+        for item in assets:
+            if item["name"] == rc.MANIFEST:
+                continue
+            identity = rc.download_asset(gh, item["id"], payload)
+            payload.unlink()
+            rc.require(item["size"] == identity["size"], "RC asset size mismatch")
             declaration = expected[item["name"]]
             rc.require(
-                len(data) == declaration["size"]
-                and rc.digest(data) == declaration["sha256"],
+                identity["size"] == declaration["size"]
+                and identity["sha256"] == declaration["sha256"],
                 f"RC payload checksum mismatch: {item['name']}",
             )
     rc.require(
@@ -140,8 +187,10 @@ def event_inputs() -> dict:
     return event.get("inputs") or {}
 
 
+# Keep integrity checks and mismatch accumulation together at the trust boundary.
+# pylint: disable-next=too-many-locals
 def verify_final_toolchains(gh, candidate, receipts):
-    """A floating runner/toolchain update requires a fresh RC, not an untested final."""
+    """Reject exact toolchain drift after checking every platform receipt's bytes."""
     _, _, assets = rc.release_snapshot(gh, candidate["tag"])
     inventory = {item["name"]: item for item in assets}
     expected = {item["name"]: item for item in candidate.get("build_receipts", [])}
@@ -149,7 +198,9 @@ def verify_final_toolchains(gh, candidate, receipts):
         set(expected) == {item["name"] for item in receipts},
         "Final platform receipt inventory differs from RC",
     )
-    for current in receipts:
+    differences = []
+    fields = platforms = 0
+    for current in sorted(receipts, key=lambda item: item["name"]):
         name = current["name"]
         rc.require(name in inventory, "RC platform receipt is missing")
         raw = gh.binary(
@@ -158,10 +209,41 @@ def verify_final_toolchains(gh, candidate, receipts):
         rc.require(
             rc.digest(raw) == expected[name]["sha256"], "RC toolchain receipt changed"
         )
-        original = rc.parse_json(raw, "RC toolchain receipt")
+        try:
+            original = rc.parse_json(raw, "RC toolchain receipt")
+        except rc.ReleaseError:
+            # Duplicate JSON keys can contain arbitrary text; do not echo them.
+            raise rc.ReleaseError("Invalid JSON in RC toolchain receipt") from None
         rc.require(
-            original.get("toolchain") == current["inputs"].get("toolchain"),
-            f"Build toolchain differs from accepted RC for {name}; create a new RC",
+            isinstance(original, dict) and isinstance(current.get("inputs"), dict),
+            "Invalid toolchain receipt object",
+        )
+        before = original.get("toolchain")
+        after = current["inputs"].get("toolchain")
+        # This exact equality remains the acceptance predicate. Diagnostics must
+        # never normalize, drop or otherwise reinterpret receipt fields.
+        if before == after:
+            continue
+        platforms += 1
+        for path, change in toolchain_changes(before, after):
+            fields += 1
+            if len(differences) < MAX_TOOLCHAIN_DIAGNOSTICS:
+                differences.append(f"  {diagnostic_label(name)}: {path}: {change}")
+    if platforms:
+        omitted = fields - len(differences)
+        if omitted:
+            differences.append(
+                f"  {omitted} further field differences omitted (log limit)"
+            )
+        raise rc.ReleaseError(
+            f"Build toolchain differs from accepted RC: {platforms} platform receipt(s), "
+            f"{fields} field difference(s).\n"
+            + "\n".join(differences)
+            + "\nValues are withheld; inspect the verified RC/final receipts. "
+            "Floating runner image rollouts can give successive jobs different "
+            "ImageVersion values. Investigate runner/toolchain availability before "
+            "another RC/final cycle; a new RC alone does not guarantee matching inputs. "
+            "Exact equality is still required for publication."
         )
 
 
@@ -278,6 +360,9 @@ def publish_versioned(args):
     rc.ensure_absent(gh, plan["tag"])
     if channel in {"beta", "rc"}:
         rc.ensure_absent(gh, f"v{plan['base_version']}")
+    superseded = rc.superseded_candidate(gh, info, run, channel)
+    if superseded:
+        return superseded
     with tempfile.TemporaryDirectory(prefix="release-versioned-") as temp:
         stage = Path(temp)
         assets = rc.stage_assets(Path(args.assets), stage)
@@ -309,8 +394,6 @@ def publish_versioned(args):
             manifest["derived_from_rc"] = parent
         content = rc.json_bytes(manifest)
         (stage / rc.MANIFEST).write_bytes(content)
-        rc.EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
-        rc.EVIDENCE.write_bytes(content)
         # Recheck immediately before the first public release mutation.
         verify_reservation(gh, plan, run["id"], parent)
         if channel == "stable":
@@ -320,6 +403,12 @@ def publish_versioned(args):
             if parent
             else f"{channel} candidate with a version fixed before compilation."
         )
+        superseded = rc.superseded_candidate(gh, info, run, channel)
+        if superseded:
+            return superseded
+        rc.check_workflow_publication(gh, plan["source_sha"])
+        rc.EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
+        rc.EVIDENCE.write_bytes(content)
         begin_publication(gh, plan, run["id"], parent)
         result = rc.publish(
             gh,
@@ -332,6 +421,7 @@ def publish_versioned(args):
             f"See `{rc.MANIFEST}` for package hashes and version input evidence.",
         )
     return {
+        "status": "published",
         "tag": plan["tag"],
         "release_url": result["html_url"],
         "manifest_path": str(rc.EVIDENCE),

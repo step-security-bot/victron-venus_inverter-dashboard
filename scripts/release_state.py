@@ -58,7 +58,8 @@ class StateGitHub(rc.GitHub):
                 input=rc.json_bytes(body) if body else None,
                 capture_output=True,
                 check=False,
-            )
+            ),
+            f"{method} {self.base}/{path}",
         )
 
 

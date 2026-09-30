@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 import tomllib
+from release_control import atomic_write_bytes
 
 BASE = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z", re.ASCII)
 SHA = re.compile(r"[0-9a-f]{40}\Z", re.ASCII)
@@ -1614,7 +1615,8 @@ def main(argv=None):  # pylint: disable=too-many-locals
                     not in {item["path"] for item in policy["versioning"]["files"]},
                     "Evidence output must not overwrite a version input",
                 )
-                output.write_bytes(
+                atomic_write_bytes(
+                    root / output.name,
                     json_bytes(
                         {
                             "schema": 1,
@@ -1624,7 +1626,7 @@ def main(argv=None):  # pylint: disable=too-many-locals
                             "effective_inputs_sha256": effective_inputs_digest(result),
                         }
                     )
-                    + b"\n"
+                    + b"\n",
                 )
         print(json.dumps(result, indent=2))
         return 0

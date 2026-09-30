@@ -22,9 +22,11 @@ import tarfile
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "version_plan.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("version_plan", SCRIPT)
 version = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(version)
@@ -1173,6 +1175,77 @@ class ArtifactTest(unittest.TestCase):
         path.write_bytes(b"binary")
         with self.assertRaisesRegex(ValueError, "Unsupported version format"):
             version.verify_artifact(path, {"format": "apk"}, self.plan)
+
+
+class EvidenceOutputTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.parent = Path(self.temporary.name)
+        self.root = self.parent / "checkout"
+        self.root.mkdir()
+        self.config = policy()
+        self.plan = version.create_plan("2.5.42", "beta", 1, SHA, self.config)
+        (self.root / "package.json").write_text('{"name":"product","version":"2.5.42"}')
+        (self.root / ".release-policy.json").write_text(json.dumps(self.config))
+        (self.root / ".release-plan.json").write_text(json.dumps(self.plan))
+        self.outside = self.parent / "outside.json"
+        self.outside.write_bytes(b"outside sentinel\n")
+
+    def sync(self, output):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return version.main(
+                [
+                    "sync",
+                    "--root",
+                    str(self.root),
+                    "--plan",
+                    ".release-plan.json",
+                    "--output",
+                    str(output),
+                ]
+            )
+
+    def test_hardlinked_output_preserves_outside_bytes_and_plan_hashes(self):
+        output = self.root / "custom-evidence.json"
+        os.link(self.outside, output)
+        self.assertEqual(self.sync(output), 0)
+        self.assertEqual(self.outside.read_bytes(), b"outside sentinel\n")
+        raw = output.read_bytes()
+        evidence = json.loads(raw)
+        self.assertEqual(raw, version.json_bytes(evidence) + b"\n")
+        self.assertEqual(evidence["source_sha"], SHA)
+        self.assertEqual(evidence["plan_sha256"], version.plan_digest(self.plan))
+        self.assertEqual(
+            evidence["effective_inputs_sha256"],
+            version.effective_inputs_digest(evidence["files"]),
+        )
+        self.assertEqual(
+            evidence["files"][0]["after_sha256"],
+            version.digest((self.root / "package.json").read_bytes()),
+        )
+        self.assertNotEqual(output.stat().st_ino, self.outside.stat().st_ino)
+
+    def test_output_guards_reject_escape_symlink_directory_and_version_input(self):
+        (self.root / "alias.json").symlink_to(self.outside)
+        (self.root / "directory").mkdir()
+        (self.root / "parent-alias").symlink_to(self.parent, target_is_directory=True)
+        for output in (
+            "../outside.json",
+            self.outside,
+            "alias.json",
+            "directory",
+            "parent-alias/outside.json",
+            "package.json",
+        ):
+            with self.subTest(output=str(output)):
+                self.assertEqual(self.sync(output), 1)
+                self.assertEqual(self.outside.read_bytes(), b"outside sentinel\n")
+                self.assertEqual(
+                    json.loads((self.root / "package.json").read_bytes()),
+                    {"name": "product", "version": "2.5.42-beta.1"},
+                )
+        self.assertEqual(list(self.root.glob(".release-output-*")), [])
 
 
 if __name__ == "__main__":
