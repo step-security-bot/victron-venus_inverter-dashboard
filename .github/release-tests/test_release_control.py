@@ -1223,6 +1223,52 @@ class TransportTests(unittest.TestCase):
                 check=False,
             )
 
+    def test_upload_parse_failure_keeps_draft_and_reports_safe_asset_context(self):
+        """A committed upload with a broken response must not be retried or published."""
+        gh = FakeGitHub()
+        client = rc.GitHub(REPO)
+        tag = "v1.2.3-beta.7"
+
+        def accepted_upload_then_failed_response(upload_tag, path):
+            FakeGitHub.upload(gh, upload_tag, path)
+            client.upload(upload_tag, path)
+
+        with tempfile.TemporaryDirectory(prefix="release-versioned-") as temp:
+            asset = Path(temp) / rc.MANIFEST
+            asset.write_bytes(b"private package bytes")
+            with (
+                patch.dict(os.environ, {"GH_TOKEN": "private-token-fixture"}),
+                patch.object(
+                    gh, "upload", side_effect=accepted_upload_then_failed_response
+                ),
+                patch.object(
+                    rc.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        [], 1, b"private response body", b"unexpected end of JSON input"
+                    ),
+                ) as command,
+                self.assertRaises(rc.GitHubError) as error,
+            ):
+                rc.publish(gh, tag, SHA, Path(temp), True, "private release body")
+            release_id = next(
+                key
+                for key, release in gh.releases.items()
+                if release["tag_name"] == tag
+            )
+            self.assertTrue(gh.releases[release_id]["draft"])
+            self.assertEqual(len(gh.assets[release_id]), 1)
+            self.assertEqual(sum(write[0] == "upload" for write in gh.writes), 1)
+            self.assertFalse(any(write[1] == "PATCH" for write in gh.writes))
+            command.assert_called_once()
+            self.assertNotIn("--clobber", command.call_args.args[0])
+            self.assertNotIn(temp, str(error.exception))
+            self.assertNotIn("private", str(error.exception))
+            self.assertEqual(
+                str(error.exception),
+                f"upload {tag} {asset.name}: unexpected end of JSON input",
+            )
+
     def test_canonical_numeric_fields_remain_ascii(self):
         """Reject Unicode digits after adopting concise regexes with ASCII flags."""
         for value in ("1.٢.3", "01.2.3", "1.2.3\n"):

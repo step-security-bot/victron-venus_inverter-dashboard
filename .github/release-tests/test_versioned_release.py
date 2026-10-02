@@ -604,7 +604,7 @@ class ReceiptTests(unittest.TestCase):
             self.create()
 
 
-class LifecycleTests(unittest.TestCase):
+class LifecycleTests(unittest.TestCase):  # pylint: disable=too-many-public-methods
     def setUp(self):
         self.enterContext(
             patch.object(
@@ -718,6 +718,238 @@ class LifecycleTests(unittest.TestCase):
         ]
         self.gh.source_policies[SHA] = copy.deepcopy(self.policy)
         (self.root / ".release-policy.json").write_bytes(rc.json_bytes(self.policy))
+
+    def qualify_schedule_fixture(self, channel="rc"):
+        """Publish real receipts/evidence, then model GitHub's asset digests."""
+        result, plan, _ = self.release_run(channel, 100)
+        self.gh.jobs_by_run[100] = [
+            copy.deepcopy(self.gh.jobs[0]),
+            {**self.gh.jobs[0], "name": "checks / CI gate"},
+        ]
+        for assets in self.gh.assets.values():
+            for asset in assets:
+                asset["digest"] = "sha256:" + rc.digest(self.gh.files[asset["id"]])
+        return result, plan
+
+    def start_schedule(self):
+        """A schedule starts in a fresh checkout and never receives a manual opt-in."""
+        self.start_run("nightly", 200)
+        self.gh.runs[200]["event"] = "schedule"
+        os.environ["GITHUB_EVENT_NAME"] = "schedule"
+        lifecycle.PLAN.unlink(missing_ok=True)
+        rc.EVIDENCE.unlink(missing_ok=True)
+
+    def build_schedule(self):
+        self.start_schedule()
+        prepared = lifecycle.prepare(self.args)
+        self.assertEqual(prepared["build"], "true")
+        self.assertTrue(prepared["plan_artifact"])
+        self.assertNotIn("reused_release", prepared)
+        return self.build_current()
+
+    def test_scheduled_rc_reuse_preserves_floor_and_promotion_after_full_build(self):
+        self.policy["versioning"]["promotion"] = "promote-bytes"
+        self.gh.source_policies[SHA] = self.policy
+        (self.root / ".release-policy.json").write_bytes(rc.json_bytes(self.policy))
+        published, accepted = self.qualify_schedule_fixture()
+        floor = self.gh.ledger["publication_floor"]
+        plan = self.build_schedule()
+        self.assertGreater(plan["build_number"], accepted["build_number"])
+        writes = copy.deepcopy(self.gh.ledger_writes)
+        release_writes = copy.deepcopy(self.gh.writes)
+        with patch.object(
+            self.gh, "download_asset", wraps=self.gh.download_asset
+        ) as download:
+            result = lifecycle.publish_versioned(self.args)
+        self.assertEqual(result["status"], "reused")
+        self.assertEqual(result["tag"], published["tag"])
+        self.assertEqual(self.gh.ledger["publication_floor"], floor)
+        self.assertEqual(self.gh.ledger_writes, writes)
+        self.assertEqual(self.gh.writes, release_writes)
+        state.verify_promotion_order(self.gh, accepted)
+        self.assertFalse(rc.EVIDENCE.exists())
+        download.assert_not_called()
+
+    def test_scheduled_beta_reuses_retained_qualified_package(self):
+        published, _ = self.qualify_schedule_fixture("beta")
+        self.build_schedule()
+        result = lifecycle.publish_versioned(self.args)
+        self.assertEqual(result["status"], "reused")
+        self.assertEqual(result["tag"], published["tag"])
+
+    def test_promoted_stable_can_reuse_original_rc_evidence(self):
+        self.policy["versioning"]["promotion"] = "promote-bytes"
+        self.gh.source_policies[SHA] = self.policy
+        (self.root / ".release-policy.json").write_bytes(rc.json_bytes(self.policy))
+        published, _ = self.qualify_schedule_fixture()
+        release = next(
+            value
+            for value in self.gh.releases.values()
+            if value["tag_name"] == published["tag"]
+        )
+        release.update(tag_name="v1.2.3", prerelease=False)
+        self.gh.refs["v1.2.3"] = {
+            "ref": "refs/tags/v1.2.3",
+            "object": {"type": "commit", "sha": SHA},
+        }
+        del self.gh.refs[published["tag"]]
+        self.build_schedule()
+        result = lifecycle.publish_versioned(self.args)
+        self.assertEqual(result["status"], "reused")
+        self.assertEqual(result["tag"], "v1.2.3")
+
+    def test_final_build_stable_is_a_qualified_publication(self):
+        candidate, _ = self.qualify_schedule_fixture()
+        published, _, _ = self.release_run("stable", 101, candidate["tag"])
+        self.gh.jobs_by_run[101] = [
+            copy.deepcopy(self.gh.jobs[0]),
+            {**self.gh.jobs[0], "name": "checks / CI gate"},
+        ]
+        for assets in self.gh.assets.values():
+            for asset in assets:
+                asset["digest"] = "sha256:" + rc.digest(self.gh.files[asset["id"]])
+        self.build_schedule()
+        result = lifecycle.publish_versioned(self.args)
+        self.assertEqual(result["status"], "reused")
+        self.assertEqual(result["tag"], published["tag"])
+
+    def test_release_mutation_during_verification_does_not_skip_publication(self):
+        published, _ = self.qualify_schedule_fixture()
+        self.build_schedule()
+        release = next(
+            value
+            for value in self.gh.releases.values()
+            if value["tag_name"] == published["tag"]
+        )
+        original = self.gh.binary
+
+        def changed(path):
+            release["updated_at"] = "2026-10-02T11:59:00Z"
+            return original(path)
+
+        with patch.object(self.gh, "binary", side_effect=changed):
+            result = lifecycle.publish_versioned(self.args)
+        self.assertEqual(result["status"], "published")
+
+    def test_unqualified_or_changed_release_never_skips_publication(self):
+        published, _ = self.qualify_schedule_fixture()
+        plan = self.build_schedule()
+        baseline = copy.deepcopy(self.gh)
+        release_id = next(
+            key
+            for key, value in baseline.releases.items()
+            if value["tag_name"] == published["tag"]
+        )
+        cases = {
+            "draft": lambda gh: gh.releases[release_id].update(draft=True),
+            "upload": lambda gh: gh.assets[release_id][0].update(state="new"),
+            "asset_digest": lambda gh: gh.assets[release_id][0].update(
+                digest="sha256:" + "0" * 64
+            ),
+            "expired": lambda gh: gh.evidence_by_run[100][0].update(expired=True),
+            "evidence_digest": lambda gh: gh.evidence_by_run[100][0].update(
+                digest="sha256:" + "0" * 64
+            ),
+            "failed_run": lambda gh: gh.runs[100].update(conclusion="failure"),
+            "rerun": lambda gh: gh.runs[100].update(run_attempt=2),
+            "wrong_workflow": lambda gh: gh.runs[100].update(
+                path=".github/workflows/other.yml"
+            ),
+            "ci_failure": lambda gh: gh.jobs_by_run[100][1].update(
+                conclusion="failure"
+            ),
+            "release_failure": lambda gh: gh.jobs_by_run[100][0].update(
+                conclusion="failure"
+            ),
+            "changed_source": lambda gh: gh.ledger["plans"]["100"]["plan"].update(
+                source_sha="b" * 40
+            ),
+            "changed_policy": lambda gh: gh.ledger["plans"]["100"]["plan"].update(
+                policy_sha256="0" * 64
+            ),
+            "changed_base": lambda gh: gh.ledger["plans"]["100"]["plan"].update(
+                base_version="1.2.4",
+                version="1.2.4-rc.3",
+                tag="v1.2.4-rc.3",
+                sequence=3,
+            ),
+        }
+        for reason, mutate in cases.items():
+            gh = copy.deepcopy(baseline)
+            mutate(gh)
+            with (
+                self.subTest(reason=reason),
+                patch.object(lifecycle, "StateGitHub", return_value=gh),
+            ):
+                result = lifecycle.publish_versioned(self.args)
+                self.assertEqual(result["status"], "published")
+                self.assertEqual(result["tag"], plan["tag"])
+                self.assertEqual(gh.ledger["publication_floor"], plan["build_number"])
+
+    def test_unqualified_nightly_is_not_a_reuse_baseline(self):
+        self.qualify_schedule_fixture("nightly")
+        self.build_schedule()
+        self.assertEqual(lifecycle.publish_versioned(self.args)["status"], "published")
+
+    def test_manual_nightly_always_publishes_despite_qualified_rc(self):
+        self.qualify_schedule_fixture()
+        self.start_run("nightly", 200)
+        lifecycle.prepare(self.args)
+        self.build_current()
+        with patch.object(lifecycle, "scheduled_reuse") as reuse:
+            result = lifecycle.publish_versioned(self.args)
+        self.assertEqual(result["status"], "published")
+        reuse.assert_not_called()
+
+    def test_new_source_always_publishes_despite_previous_rc(self):
+        self.qualify_schedule_fixture()
+        self.start_schedule()
+        sha = "b" * 40
+        self.gh.default_head = sha
+        self.gh.runs[200]["head_sha"] = sha
+        self.gh.jobs[0]["head_sha"] = sha
+        self.gh.source_policies[sha] = self.policy
+        Path(os.environ["GITHUB_EVENT_PATH"]).write_text("{}", encoding="utf-8")
+        with patch.object(rc, "checked_out_sha", return_value=sha):
+            lifecycle.prepare(self.args)
+            self.build_current()
+            result = lifecycle.publish_versioned(self.args)
+        self.assertEqual(result["status"], "published")
+
+    def test_default_branch_movement_during_reuse_prevents_skip(self):
+        self.qualify_schedule_fixture()
+        self.build_schedule()
+        info = rc.repository_info(self.gh)
+        snapshot = rc.source_policy_snapshot(self.gh, SHA)
+        binary = self.gh.binary
+
+        def moved(path):
+            self.gh.default_head = "b" * 40
+            return binary(path)
+
+        with patch.object(self.gh, "binary", side_effect=moved):
+            result = lifecycle.scheduled_reuse(
+                self.gh, info, self.gh.runs[200], snapshot, "1.2.3"
+            )
+        self.assertEqual(result, "")
+
+    def test_failed_current_gate_cannot_reuse_previous_rc(self):
+        self.qualify_schedule_fixture()
+        self.build_schedule()
+        self.gh.jobs[0]["conclusion"] = "failure"
+        with patch.object(lifecycle, "scheduled_reuse") as reuse:
+            with self.assertRaisesRegex(rc.ReleaseError, "gate"):
+                lifecycle.publish_versioned(self.args)
+        reuse.assert_not_called()
+
+    def test_invalid_current_build_receipt_cannot_reuse_previous_rc(self):
+        self.qualify_schedule_fixture()
+        self.build_schedule()
+        (Path(self.args.assets) / "app.json").write_bytes(b"changed build")
+        with patch.object(lifecycle, "scheduled_reuse") as reuse:
+            with self.assertRaises(ValueError):
+                lifecycle.publish_versioned(self.args)
+        reuse.assert_not_called()
 
     def test_prepare_uses_refreshed_run_after_transient_status(self):
         """The frozen-plan prepare boundary waits without bypassing execution guards."""

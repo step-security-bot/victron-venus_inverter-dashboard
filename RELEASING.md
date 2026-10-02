@@ -21,7 +21,7 @@ The committed base version comes from `VERSION`. A release preparation PR
 updates that version and any required native/package companion versions together.
 Version numbers are explicit; a commit message does not automatically select one.
 
-Use `python3 scripts/release.py prepare-version --pr` to synchronize the declared source fields. A saved release plan fixes the full candidate version before compilation. See [version plans](docs/VERSIONING.md) for adapters, counters, retries and provenance.
+Use `python3 scripts/release.py prepare-version --pr` to synchronize the declared source fields. A saved release plan fixes the full candidate version before compilation. See [version plans](docs/VERSIONING.md) for adapters, counters, retries and provenance. Automatic nightlies keep all checks and builds but skip duplicate publication when retained evidence qualifies a beta/RC/stable with the same source, policy and base. Manual nightly requests still publish.
 
 Use [Semantic Versioning](https://semver.org/): patch for compatible fixes, minor
 for compatible functionality and major for incompatible changes. State changes to
