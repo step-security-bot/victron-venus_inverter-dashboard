@@ -39,7 +39,7 @@ jobs:
           runner: macos-15-intel
           executable: inverter-dashboard
         - platform: macos-arm64
-          runner: macos-14
+          runner: macos-15
           executable: inverter-dashboard
         - platform: windows-x86_64
           runner: windows-2025
