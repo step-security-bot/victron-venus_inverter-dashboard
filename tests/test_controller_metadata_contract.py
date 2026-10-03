@@ -3,6 +3,8 @@
 import json
 
 import pytest
+from fastapi import Response
+from starlette.requests import Request
 
 from inverter_dashboard import server, websocket_handler
 from inverter_dashboard.server import MqttState
@@ -10,6 +12,7 @@ from inverter_dashboard.server import MqttState
 
 @pytest.mark.asyncio
 async def test_slim_controller_metadata_survives_websocket_and_http_payloads(monkeypatch):
+    monkeypatch.setattr(server, "DASHBOARD_SECRET", "")
     ms = MqttState()
     monkeypatch.setattr(server._app_state, "mqtt_state", ms)
     monkeypatch.setitem(websocket_handler._state, "mqtt_state", ms)
@@ -46,7 +49,10 @@ async def test_slim_controller_metadata_survives_websocket_and_http_payloads(mon
         "inverter/state",
         json.dumps({**controller, "grid_loss_internal": "not public"}).encode(),
     )
-    for payload in (websocket_handler.build_payload(), await server.api_state()):
+    for payload in (
+        websocket_handler.build_payload(),
+        await server.api_state(Request({"type": "http", "headers": []}), Response()),
+    ):
         for key, expected in controller.items():
             assert payload[key] == expected, key
         assert "grid_loss_internal" not in payload
@@ -54,6 +60,7 @@ async def test_slim_controller_metadata_survives_websocket_and_http_payloads(mon
 
 @pytest.mark.asyncio
 async def test_recovery_nulls_clear_previous_controller_status(monkeypatch):
+    monkeypatch.setattr(server, "DASHBOARD_SECRET", "")
     ms = MqttState()
     monkeypatch.setattr(server._app_state, "mqtt_state", ms)
     monkeypatch.setitem(websocket_handler._state, "mqtt_state", ms)
@@ -77,6 +84,9 @@ async def test_recovery_nulls_clear_previous_controller_status(monkeypatch):
         "dvcc_limits": None,
     }
     await ms.on_message("inverter/state", json.dumps(recovery).encode())
-    for payload in (websocket_handler.build_payload(), await server.api_state()):
+    for payload in (
+        websocket_handler.build_payload(),
+        await server.api_state(Request({"type": "http", "headers": []}), Response()),
+    ):
         for key, expected in recovery.items():
             assert payload[key] == expected, key

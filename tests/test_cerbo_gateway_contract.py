@@ -3,6 +3,8 @@
 import json
 
 import pytest
+from fastapi import Response
+from starlette.requests import Request
 
 from inverter_dashboard import gateway, server, websocket_handler
 from inverter_dashboard.server import MqttState
@@ -45,6 +47,7 @@ async def test_gateway_matches_live_cerbo_and_preserves_zero():
 
 
 def test_snapshot_removal_and_api_nulls_clear_previous_measurements(monkeypatch):
+    monkeypatch.setattr(server, "DASHBOARD_SECRET", "")
     ms = MqttState()
     gateway.apply_snapshot(
         ms,
@@ -65,6 +68,7 @@ def test_snapshot_removal_and_api_nulls_clear_previous_measurements(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_http_fallback_preserves_complete_websocket_contract(monkeypatch):
+    monkeypatch.setattr(server, "DASHBOARD_SECRET", "")
     ms = MqttState()
     gateway.apply_snapshot(
         ms,
@@ -77,7 +81,7 @@ async def test_http_fallback_preserves_complete_websocket_contract(monkeypatch):
     monkeypatch.setattr(server._app_state, "mqtt_state", ms)
     monkeypatch.setitem(websocket_handler._state, "mqtt_state", ms)
     monkeypatch.setattr(websocket_handler.ha_client, "merge_overlay", lambda state: state)
-    response = await server.api_state()
+    response = await server.api_state(Request({"type": "http", "headers": []}), Response())
     assert response["g3"] == 77
     assert response["ev_power"] == 3200
     assert response["battery_soc"] == 0
