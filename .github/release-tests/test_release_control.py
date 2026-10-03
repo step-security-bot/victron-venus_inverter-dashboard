@@ -35,6 +35,53 @@ SHA = "a" * 40
 RC_TAG = "v1.2.3-rc.2"
 
 
+class AutomaticBetaPreparationTests(unittest.TestCase):
+    """An occupied base skips only automatic builds, never explicit requests."""
+
+    def test_existing_stable_tag_closes_only_push_cycle(self):
+        gh = Mock()
+        gh.api.return_value = {
+            "ref": "refs/tags/v1.2.3",
+            "object": {"type": "commit", "sha": SHA},
+        }
+        result = rc.closed_push_cycle(gh, "1.2.3", "push")
+        self.assertEqual(result["status"], "version-required")
+        self.assertEqual(result["build"], "false")
+        self.assertEqual(result["version"], "1.2.3")
+        gh.api.assert_called_once_with("git/ref/tags/v1.2.3")
+        for kind in ("workflow_dispatch", "schedule"):
+            gh.reset_mock()
+            self.assertIsNone(rc.closed_push_cycle(gh, "1.2.3", kind))
+            gh.api.assert_not_called()
+
+    def test_missing_tag_continues_but_api_errors_cannot_authorize_skip(self):
+        gh = rc.GitHub(REPO)
+        with patch.object(gh, "api", side_effect=rc.GitHubError("HTTP 404", True)):
+            self.assertIsNone(rc.closed_push_cycle(gh, "1.2.3", "push"))
+        for message in ("HTTP 401", "HTTP 403", "HTTP 429", "HTTP 500"):
+            with (
+                self.subTest(message=message),
+                patch.object(gh, "api", side_effect=rc.GitHubError(message)),
+                self.assertRaisesRegex(rc.GitHubError, message),
+            ):
+                rc.closed_push_cycle(gh, "1.2.3", "push")
+
+    def test_malformed_or_wrong_tag_response_fails_closed(self):
+        gh = Mock()
+        for ref in (
+            None,
+            {},
+            [],
+            {"ref": "refs/tags/v1.2.4", "object": {"type": "commit", "sha": SHA}},
+        ):
+            gh.api.return_value = ref
+            with (
+                self.subTest(ref=ref),
+                self.assertRaisesRegex(rc.ReleaseError, "Invalid stable tag"),
+            ):
+                rc.closed_push_cycle(gh, "1.2.3", "push")
+
+
 def policy():
     """Return a minimal release-eligible source policy."""
     return {

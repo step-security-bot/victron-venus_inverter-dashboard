@@ -508,19 +508,24 @@ notifications. Control actions remain separate from telemetry subscription.
 git clone https://github.com/victron-venus/inverter-dashboard.git
 cd inverter-dashboard
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
+# Install the exact committed runtime and test dependencies (requires uv)
+uv sync --locked --extra test
 
 # Optional: ./local_config.py for Home Assistant direct mode (gitignored)
 ./scripts/init-config.sh
 
 # Run
-python server.py --mqtt-host your-mqtt-broker
+uv run --locked inverter-dashboard --mqtt-host your-mqtt-broker
 ```
+
+### Build a Native Binary
+
+Run `./build_binaries.sh --local` (or `python3 scripts/release.py package`) to
+build and smoke-test a binary for the current OS and architecture. The same
+committed `uv.lock` and packaging dependency group are used by local and hosted
+builds. Archives and checksums are written to `release-output/`. Multi-platform
+release binaries are built on the corresponding native GitHub Actions runners;
+PyInstaller does not cross-compile them from a single host.
 
 ### Build Docker Image Locally
 

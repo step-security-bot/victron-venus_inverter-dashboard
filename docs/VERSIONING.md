@@ -23,6 +23,13 @@ PR for that version. Without `--pr`, the declared source files are edited locall
 No command commits unrelated files, pushes the default branch, or creates a
 public release. Normal project checks still apply to the preparation PR.
 
+After the stable tag for a committed base exists, automatic push betas report
+`version-required` before allocating a plan or building packages. The full quality
+and security checks still run, and their failures still fail the release gate.
+No candidate is published. Prepare and merge the next base version to resume beta
+publication. Explicit beta/RC requests still reject an occupied stable base;
+scheduled nightlies keep their existing behavior.
+
 Only owned fields change: JSON/TOML fields, the named package's lock entries,
 text versions, declared Python constants, and native configuration fields.
 Unrelated dependencies and independently versioned components are preserved.

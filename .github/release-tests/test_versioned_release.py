@@ -973,6 +973,50 @@ class LifecycleTests(unittest.TestCase):  # pylint: disable=too-many-public-meth
         self.assertEqual(len(self.gh.ledger_writes), 1)
         self.assertEqual(self.gh.writes, [])
 
+    def test_closed_push_cycle_stops_before_plan_allocation(self):
+        self.gh.refs["v1.2.3"] = {
+            "ref": "refs/tags/v1.2.3",
+            "object": {"type": "commit", "sha": SHA},
+        }
+        self.gh.runs[99]["event"] = "push"
+        os.environ["GITHUB_EVENT_NAME"] = "push"
+        original = (self.root / "version").read_bytes()
+        result = lifecycle.prepare(self.args)
+        self.assertEqual(result["status"], "version-required")
+        self.assertEqual(result["build"], "false")
+        self.assertEqual(self.gh.ledger_writes, [])
+        self.assertEqual(self.gh.writes, [])
+        self.assertFalse(lifecycle.PLAN.exists())
+        self.assertEqual((self.root / "version").read_bytes(), original)
+
+    def test_closed_push_cycle_does_not_bypass_source_or_version_checks(self):
+        self.gh.refs["v1.2.3"] = {
+            "ref": "refs/tags/v1.2.3",
+            "object": {"type": "commit", "sha": SHA},
+        }
+        self.gh.runs[99]["event"] = "push"
+        os.environ["GITHUB_EVENT_NAME"] = "push"
+        with (
+            patch.object(lifecycle.rc, "checked_out_sha", return_value="b" * 40),
+            self.assertRaises(rc.ReleaseError),
+        ):
+            lifecycle.prepare(self.args)
+        with (
+            patch.object(lifecycle.client, "resolve_version", return_value="1.2.4"),
+            self.assertRaises(ValueError),
+        ):
+            lifecycle.prepare(self.args)
+        self.assertEqual(self.gh.ledger_writes, [])
+
+    def test_explicit_beta_keeps_existing_stable_tag_error(self):
+        self.gh.refs["v1.2.3"] = {
+            "ref": "refs/tags/v1.2.3",
+            "object": {"type": "commit", "sha": SHA},
+        }
+        with self.assertRaisesRegex(rc.ReleaseError, "Tag already exists"):
+            lifecycle.prepare(self.args)
+        self.assertEqual(self.gh.ledger_writes, [])
+
     def test_prepare_build_receipt_publish_keeps_exact_identity(self):
         result = lifecycle.prepare(self.args)
         self.assertEqual(result["build"], "true")

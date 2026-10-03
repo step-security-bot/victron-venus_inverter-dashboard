@@ -442,6 +442,9 @@ def prepare(args):
     else:
         base = client.resolve_version(policy, inputs.get("version", ""))
     version_plan.check_base_versions(Path.cwd(), policy, base)
+    closed = rc.closed_push_cycle(gh, base, kind)
+    if closed:
+        return closed
     if channel in {"beta", "rc", "stable"}:
         rc.ensure_absent(gh, f"v{base}")
     plan = reserve_plan(

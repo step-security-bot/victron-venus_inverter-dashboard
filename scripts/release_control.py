@@ -851,6 +851,39 @@ def wait_for_executing_run(
         time.sleep(min(2, remaining))
 
 
+def closed_push_cycle(gh: GitHub, base: str, kind: str) -> dict | None:
+    """Stop automatic betas for an occupied stable version before any build."""
+    if kind != "push":
+        return None
+    tag = f"v{version(base)}"
+    try:
+        ref = gh.api(f"git/ref/tags/{quote(tag, safe='')}")
+    except GitHubError as error:
+        if error.not_found:
+            return None
+        raise
+    require(
+        isinstance(ref, dict)
+        and ref.get("ref") == f"refs/tags/{tag}"
+        and isinstance(ref.get("object"), dict)
+        and ref["object"].get("type") in {"commit", "tag"}
+        and isinstance(ref["object"].get("sha"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", ref["object"]["sha"]),
+        "Invalid stable tag response during automatic beta preparation",
+    )
+    return {
+        "status": "version-required",
+        "channel": "beta",
+        "version": base,
+        "build": "false",
+        "plan_artifact": "",
+        "reason": (
+            f"Stable tag {tag} already exists; prepare and merge the next "
+            "committed base version before creating another beta."
+        ),
+    }
+
+
 def ensure_absent(gh: GitHub, tag: str) -> None:
     """Refuse existing tags, published releases and hidden release drafts."""
     require(
@@ -1029,6 +1062,15 @@ def emit_result(result: dict) -> None:
     """Print the result and write validated single-line Actions outputs."""
     print(json.dumps(result, sort_keys=True))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary and result.get("status") == "version-required":
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(
+                "### Next release version required\n\n"
+                f"{result['reason']} No candidate was built or published. "
+                "Prepare the next base in a reviewed version PR; versioned consumers "
+                "can use `python3 scripts/release.py prepare-version --pr`. "
+                "Explicit beta/RC requests retain their strict version checks.\n"
+            )
     if summary and result.get("status") == "superseded":
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write(

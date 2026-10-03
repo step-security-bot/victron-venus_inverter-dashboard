@@ -785,6 +785,11 @@ def _python_edit(raw, declaration, value):
     start = sum(map(len, lines[: node.lineno - 1])) + node.col_offset
     end = sum(map(len, lines[: node.end_lineno - 1])) + node.end_col_offset
     literal = repr(replacement).encode()
+    if isinstance(replacement, str) and raw[start:end].startswith(b'"'):
+        # Preserve double-quoted source constants so version-only PRs do not
+        # change a repository's formatter style. JSON strings are Python
+        # string literals for the validated numeric/candidate version values.
+        literal = json.dumps(replacement, ensure_ascii=False).encode()
     result = raw[:start] + literal + raw[end:]
     ast.parse(result)
     return result, [node.value]

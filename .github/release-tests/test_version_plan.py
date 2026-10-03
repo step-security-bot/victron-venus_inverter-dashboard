@@ -436,7 +436,7 @@ version = "2.5.42"
         )
         self.assertEqual(
             path.read_text(),
-            before.replace('VERSION: str = "2.5.42"', "VERSION: str = '2.5.42b2'"),
+            before.replace('VERSION: str = "2.5.42"', 'VERSION: str = "2.5.42b2"'),
         )
 
     def test_python_rejects_computed_shared_or_reassigned_constant(self):
@@ -460,6 +460,23 @@ version = "2.5.42"
         config["version_file"] = "runtime.py"
         version.check_base_versions(self.root, config)
         self.assertEqual(path.read_text(), original)
+
+    def test_python_version_updates_preserve_single_and_double_quotes(self):
+        for quote in ("'", '"'):
+            with self.subTest(quote=quote):
+                before = f"__version__: str = {quote}2.5.42{quote}  # public identity\n"
+                path = self.write("runtime.py", before)
+                self.sync(
+                    [
+                        {
+                            "path": "runtime.py",
+                            "format": "python",
+                            "field": "__version__",
+                            "ecosystem": "pep440",
+                        }
+                    ]
+                )
+                self.assertEqual(path.read_text(), before.replace("2.5.42", "2.5.42b2"))
 
     def test_text_prefix_and_whitespace_preserved(self):
         path = self.write("VERSION", "  v2.5.42\r\n")
