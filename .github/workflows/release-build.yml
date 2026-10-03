@@ -46,17 +46,17 @@ jobs:
           executable: inverter-dashboard.exe
     steps:
     - name: Harden the runner
-      uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1
+      uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
       with:
         egress-policy: audit
     - name: Checkout
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - name: Set up Python
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
         python-version: ${{ env.PYTHON_VERSION }}
     - name: Download frozen release version plan
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         name: ${{ inputs.release_plan_artifact }}
         path: .
@@ -66,7 +66,7 @@ jobs:
     - name: Verify committed release version
       run: python3 scripts/check-release-version.py "$RELEASE_VERSION" "$RELEASE_CHANNEL"
     - name: Set up uv
-      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       with:
         version: 0.12.7
     - name: Install locked dependencies
@@ -84,7 +84,7 @@ jobs:
         RELEASE_ASSET_PATTERN_0: release/*
       run: python3 scripts/stage_release_assets.py --target "$RELEASE_ASSET_TARGET" --pattern "$RELEASE_ASSET_PATTERN_0"
     - name: Store release assets
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: release-assets-${{ matrix.platform }}
         path: release-assets/${{ matrix.platform }}/*
@@ -96,16 +96,16 @@ jobs:
     timeout-minutes: 60
     steps:
     - name: Harden runner
-      uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1
+      uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
       with:
         egress-policy: audit
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - name: Set up release version tooling
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
         python-version: '3.12'
     - name: Download frozen release version plan
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         name: ${{ inputs.release_plan_artifact }}
         path: .
@@ -114,13 +114,13 @@ jobs:
       run: python3 scripts/version_plan.py sync --root . --plan .release-plan.json
     - name: Verify committed release version
       run: python3 scripts/check-release-version.py "$RELEASE_VERSION" "$RELEASE_CHANNEL"
-    - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1
-    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+    - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
     - name: Check container version metadata
       id: image-version
       run: python3 scripts/release_container_labels.py --github-output "$GITHUB_OUTPUT"
     - name: Build OCI image archive
-      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
         context: .
         platforms: linux/amd64,linux/arm64
@@ -143,7 +143,7 @@ jobs:
         RELEASE_ASSET_PATTERN_0: inverter-dashboard-container.oci.tar
       run: python3 scripts/stage_release_assets.py --target "$RELEASE_ASSET_TARGET" --pattern "$RELEASE_ASSET_PATTERN_0"
     - name: Store release assets
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: release-assets-container
         path: release-assets/container/*
