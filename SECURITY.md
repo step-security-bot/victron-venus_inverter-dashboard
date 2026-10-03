@@ -1,21 +1,14 @@
 # Security Policy
 
-## Supported Versions
-
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
-
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
+Private vulnerability reporting is enabled for this repository. Use
+[Report a vulnerability](https://github.com/victron-venus/inverter-dashboard/security/advisories/new)
+to send a confidential report to the maintainers. Follow
+[GitHub's private reporting instructions](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability)
+if you need help submitting the report.
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+Include the affected version or commit, steps to reproduce, expected and actual
+behavior, and potential impact. Remove access tokens, credentials and personal
+data from examples. Do not disclose exploit details in public issues before
+coordinating with the maintainers.
