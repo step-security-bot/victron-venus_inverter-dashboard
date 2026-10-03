@@ -3,23 +3,22 @@
 
 from __future__ import annotations
 
+import http.client
 import os
 import ssl
-import urllib.error
-import urllib.request
 
 
 def main() -> int:
     config = os.environ.get("INVERTER_DASHBOARD_CONFIG", "/app/config")
-    port = os.environ.get("WEB_PORT", "8080")
     crt = os.path.join(config, "dashboard.crt")
     key = os.path.join(config, "dashboard.key")
-    host = f"127.0.0.1:{port}"
-    # Localhost-only container healthcheck; HTTPS is used below when TLS is configured.
-    url = f"http://{host}/api/state"  # NOSONAR
     timeout = 8
 
+    connection = None
     try:
+        port = int(os.environ.get("WEB_PORT", "8080"))
+        if not 1 <= port <= 65535:
+            return 1
         if os.path.isfile(crt) and os.path.isfile(key):
             # For HTTPS with self-signed certs inside container at localhost:
             # trust the dashboard's own cert file instead of disabling verification.
@@ -28,20 +27,21 @@ def main() -> int:
             # as an IP SAN, so the handshake against https://127.0.0.1 succeeds.
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ctx.load_verify_locations(cafile=crt)
-            url = f"https://{host}/api/state"
-            with urllib.request.urlopen(url, context=ctx, timeout=timeout):
-                pass
+            connection = http.client.HTTPSConnection(
+                "127.0.0.1", port, context=ctx, timeout=timeout
+            )
         else:
-            with urllib.request.urlopen(url, timeout=timeout):
-                pass
-        return 0
-    except urllib.error.HTTPError as e:
-        # 401/403 means server is up but auth failed - health is OK
-        if e.code in (401, 403):
-            return 0
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        # A health probe must stay on loopback, including when the server redirects.
+        connection.request("GET", "/api/state")
+        status = connection.getresponse().status
+        # 401/403 means the server is up but requires authentication.
+        return 0 if 200 <= status < 300 or status in (401, 403) else 1
+    except (OSError, ValueError, http.client.HTTPException):
         return 1
-    except OSError:
-        return 1
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 if __name__ == "__main__":

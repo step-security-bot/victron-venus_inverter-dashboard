@@ -116,7 +116,9 @@ def download_and_update() -> tuple[bool, str]:
         )
     except (subprocess.SubprocessError, OSError) as e:
         logger.warning("Self-update failed: %s", e)
-        return False, f"git update failed: {e}"
+        # This message is returned by /api/update; keep subprocess arguments,
+        # filesystem paths and other exception details in the server log only.
+        return False, "git update failed"
 
     new_version = get_version()
     logger.info("Self-updated to %s — restarting", new_version)

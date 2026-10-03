@@ -111,7 +111,7 @@ class TestDownloadAndUpdate:
         monkeypatch.setattr("subprocess.run", boom)
         ok, msg = download_and_update()
         assert ok is False
-        assert msg.startswith("git update failed:")
+        assert msg == "git update failed"
 
     def test_os_error_returns_false(self, monkeypatch):
         self._enable(monkeypatch)
@@ -121,4 +121,22 @@ class TestDownloadAndUpdate:
         )
         ok, msg = download_and_update()
         assert ok is False
-        assert "git update failed" in msg
+        assert msg == "git update failed"
+        assert "no repo" not in msg
+
+    @pytest.mark.parametrize("operation", [1, 2])
+    def test_git_failure_does_not_return_subprocess_details(self, monkeypatch, caplog, operation):
+        import subprocess
+
+        self._enable(monkeypatch)
+        calls = 0
+
+        def fail(cmd, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == operation:
+                raise subprocess.CalledProcessError(128, ["git", "/private/repository"])
+
+        monkeypatch.setattr("subprocess.run", fail)
+        assert download_and_update() == (False, "git update failed")
+        assert "/private/repository" in caplog.text

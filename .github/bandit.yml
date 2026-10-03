@@ -1,0 +1,6 @@
+# Pytest assertions verify behavior, rather than enforcing runtime safeguards.
+# All other rules still scan tests; production assertions are still reported.
+assert_used:
+  skips:
+    - './tests/test_*.py'
+    - './.github/release-tests/test_*.py'

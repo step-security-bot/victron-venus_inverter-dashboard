@@ -1,5 +1,7 @@
 """Tests for config module."""
 
+from urllib.parse import urlsplit
+
 
 class TestConfig:
     """Tests for config module defaults."""
@@ -24,5 +26,7 @@ class TestConfig:
     def test_github_raw_url(self):
         from inverter_dashboard import config
 
-        assert "raw.githubusercontent.com" in config.GITHUB_RAW_URL
-        assert config.GITHUB_REPO in config.GITHUB_RAW_URL
+        url = urlsplit(config.GITHUB_RAW_URL)
+        assert url.scheme == "https"
+        assert url.hostname == "raw.githubusercontent.com"
+        assert url.path.startswith(f"/{config.GITHUB_REPO}/")
