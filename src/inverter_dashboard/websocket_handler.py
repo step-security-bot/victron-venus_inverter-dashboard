@@ -2,6 +2,7 @@
 WebSocket handler for real-time dashboard updates
 """
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -58,6 +59,10 @@ async def mqtt_publish(client: Client, action: str, payload: dict[str, Any] | No
 
 # Connected WebSocket clients
 ws_clients: set[WebSocket] = set()
+_ws_write_locks: dict[WebSocket, asyncio.Lock] = {}
+_broadcast_lock = asyncio.Lock()
+WS_SEND_TIMEOUT_SECONDS = 2.0
+WS_CLOSE_TIMEOUT_SECONDS = 1.0
 
 
 # Pydantic model for allowed state fields - replaces _STATE_ALLOWLIST
@@ -339,25 +344,49 @@ def _with_ui_config(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-async def broadcast_state():
-    """Send state to all WebSocket clients"""
-    # Snapshot to avoid mutation during iteration
-    clients = list(ws_clients)
-    if not clients:
-        return
+def _forget_client(websocket: WebSocket) -> None:
+    ws_clients.discard(websocket)
+    _ws_write_locks.pop(websocket, None)
 
-    data = build_payload()
-    message = json.dumps(data)
-    disconnected: list[WebSocket] = []
 
-    for ws in clients:
+async def _send_state(websocket: WebSocket, message: str) -> bool:
+    """Serialize each peer's writes and bound transport backpressure."""
+    if websocket not in ws_clients:
+        return False
+    lock = _ws_write_locks.setdefault(websocket, asyncio.Lock())
+    async with lock:
+        # An earlier queued write or the receive loop may have disconnected it.
+        if websocket not in ws_clients:
+            return False
         try:
-            await ws.send_text(message)
+            async with asyncio.timeout(WS_SEND_TIMEOUT_SECONDS):
+                await websocket.send_text(message)
+            return True
         except Exception:
-            disconnected.append(ws)
+            _forget_client(websocket)
+            logger.warning("WebSocket state send failed; disconnecting client")
+            try:
+                async with asyncio.timeout(WS_CLOSE_TIMEOUT_SECONDS):
+                    await websocket.close(code=1013)
+            except Exception:
+                logger.debug("WebSocket close did not complete after failed state send")
+            return False
 
-    for ws in disconnected:
-        ws_clients.discard(ws)
+
+async def broadcast_state():
+    """Send the same state to every peer without serial network waits."""
+    # Apply backpressure to callers before allocating a payload or per-peer tasks.
+    # Only one fan-out is active; initial frames share each peer's write lock.
+    async with _broadcast_lock:
+        clients = list(ws_clients)
+        if not clients:
+            return
+
+        data = build_payload()
+        message = json.dumps(data)
+        async with asyncio.TaskGroup() as sends:
+            for ws in clients:
+                sends.create_task(_send_state(ws, message))
 
 
 # Inverter-control flags published on Cerbo MQTT inverter/state.booleans
@@ -540,7 +569,8 @@ async def handle_websocket(websocket: WebSocket, app_state):
     logger.info("WebSocket client connected (%d total)", len(ws_clients))
 
     try:
-        await websocket.send_json(build_payload())
+        if not await _send_state(websocket, json.dumps(build_payload())):
+            return
 
         while True:
             data = await websocket.receive_json()
@@ -553,5 +583,5 @@ async def handle_websocket(websocket: WebSocket, app_state):
     except Exception:
         logger.exception("WebSocket error")
     finally:
-        ws_clients.discard(websocket)
+        _forget_client(websocket)
         logger.info("WebSocket client disconnected (%d remaining)", len(ws_clients))
