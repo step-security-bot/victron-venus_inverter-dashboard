@@ -101,6 +101,14 @@ Cerbo-oriented `victron-venus/inverter-dashboard-node-red` image.
 
 ## Smoke checks
 
+Kubernetes and container liveness probes use `/health/live`. This endpoint checks
+the HTTP event loop without loading the SPA, authenticating a dashboard session,
+or building a live telemetry payload. Keep probe timeouts at five seconds on
+shared workers. A healthy process alone does not prove that the gateway or Home
+Assistant has fresh data; check `/api/state` separately below. Normal shutdown
+cancels and joins the HA poller, transport tasks, and version check before clearing
+the MQTT client.
+
 Set these variables to your local deployment values:
 
 ```bash

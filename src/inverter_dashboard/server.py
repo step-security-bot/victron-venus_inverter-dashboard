@@ -610,23 +610,17 @@ def _start_version_check():
     return asyncio.create_task(_bg_version_check())
 
 
-async def _shutdown_tasks(ha_task):
+async def _shutdown_tasks(ha_task, version_task=None):
     """Cancel and await all background tasks."""
-    cancelled = False
-    if ha_task:
-        ha_task.cancel()
-        try:
-            await ha_task
-        except asyncio.CancelledError:
-            cancelled = True
-
-    for task in _app_state.mqtt_tasks:
+    tasks = [task for task in (ha_task, version_task) if task is not None]
+    tasks.extend(_app_state.mqtt_tasks)
+    _app_state.mqtt_tasks.clear()
+    for task in tasks:
         task.cancel()
-    if _app_state.mqtt_tasks:
-        await asyncio.gather(*_app_state.mqtt_tasks, return_exceptions=True)
-
-    if cancelled:
-        raise asyncio.CancelledError
+    if tasks:
+        # Cancellation of our children is expected during a normal shutdown.
+        # Cancellation of this coroutine itself still propagates from gather.
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _shutdown_mqtt_client():
@@ -758,15 +752,17 @@ async def lifespan(_app: FastAPI):
     ha_client.load_config()
     settings_store.apply_connection_overrides()  # file wins over env; CLI applied later wins over file
     websocket_handler.set_ui_settings(settings_store.load_settings())
-    await _select_and_start_data_source()
-    ha_task = _start_ha_polling()
-    _start_version_check()
-
-    yield
-
-    # Shutdown
-    await _shutdown_tasks(ha_task)
-    await _shutdown_mqtt_client()
+    ha_task = version_task = None
+    try:
+        await _select_and_start_data_source()
+        ha_task = _start_ha_polling()
+        version_task = _start_version_check()
+        yield
+    finally:
+        try:
+            await _shutdown_tasks(ha_task, version_task)
+        finally:
+            await _shutdown_mqtt_client()
 
 
 app = FastAPI(title="Inverter Dashboard", lifespan=lifespan)
@@ -811,6 +807,13 @@ _mount_vue_dist()
 
 
 # Routes
+@app.get("/health/live")
+async def health_live(response: Response):
+    """Check the HTTP event loop without reading assets, credentials, or telemetry."""
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, token: str | None = None):
     """Serve Vue SPA from static/dist or static/, or 404 if not built"""
