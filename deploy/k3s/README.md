@@ -5,7 +5,10 @@ worker label and ingress host in a local copy before applying them. Keep real
 addresses, cluster contexts, operational notes and credentials under
 `.local-private/` (ignored by Git) or in a private configuration store.
 
-Image: `alvit/inverter-dashboard` (Docker Hub); `kustomization.yaml` pins the tag.
+`kustomization.yaml` pins the verified 1.8.24 image built from source `2476df7`
+by digest. Its registry hostname is a placeholder: set `images[].newName` to
+the registry holding that exact image in your ignored local copy. This image
+contains `/health/live`; do not pair these probes with an older image.
 The deployment example selects `worker-1`; choose a worker in your own cluster.
 The namespace and resource names use the generic application name
 `inverter-dashboard`.
@@ -20,6 +23,9 @@ chmod 600 .local-private/dashboard/*.yaml
 ```
 
 Edit that local copy's ConfigMap, Deployment and Ingress for your environment.
+Edit its Kustomization registry hostname as described above; keep the pinned
+digest. Use a new verified digest when upgrading, and roll back the image and
+its compatible probe manifest together.
 Set `CERBO_PORTAL_ID` locally when portal-specific water/EV mapping is needed.
 The public ConfigMap leaves it empty and uses `https://gateway.example.com:9151` as
 a documentation-only gateway address. Real configuration must stay out of commits.
@@ -100,6 +106,22 @@ This Python image is the multi-arch NAS/k3s path. It is distinct from the
 Cerbo-oriented `victron-venus/inverter-dashboard-node-red` image.
 
 ## Smoke checks
+
+Kubernetes and container liveness probes use `/health/live`. This endpoint checks
+the HTTP event loop without loading the SPA, authenticating a dashboard session,
+or building a live telemetry payload. Keep probe timeouts at five seconds on
+shared workers. A healthy process alone does not prove that the gateway or Home
+Assistant has fresh data; check `/api/state` separately below. Normal shutdown
+cancels and joins the HA poller, transport tasks, and version check before clearing
+the MQTT client.
+
+The startup probe allows up to five minutes for cold imports on a busy worker
+before liveness checks take over.
+
+The example uses the image's UID/GID1000, a read-only root filesystem and a bounded
+writable `/tmp`. Self-update is disabled; replace the tested image to upgrade.
+The existing mounted configuration remains read-only, so runtime settings cannot
+be persisted into that Secret volume.
 
 Set these variables to your local deployment values:
 

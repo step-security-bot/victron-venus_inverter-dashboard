@@ -36,8 +36,8 @@ def test_loopback_probe_never_follows_redirects(monkeypatch, tmp_path, status):
         return connection
 
     monkeypatch.setattr(docker_healthcheck.http.client, "HTTPConnection", connect)
-    assert docker_healthcheck.main() == (0 if status in (200, 204, 401, 403) else 1)
-    assert connection.requests == [("GET", "/api/state")]
+    assert docker_healthcheck.main() == (0 if status in (200, 204) else 1)
+    assert connection.requests == [("GET", "/health/live")]
     assert connection.closed
 
 

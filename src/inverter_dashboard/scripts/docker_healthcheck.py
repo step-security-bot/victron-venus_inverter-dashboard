@@ -33,10 +33,9 @@ def main() -> int:
         else:
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
         # A health probe must stay on loopback, including when the server redirects.
-        connection.request("GET", "/api/state")
+        connection.request("GET", "/health/live")
         status = connection.getresponse().status
-        # 401/403 means the server is up but requires authentication.
-        return 0 if 200 <= status < 300 or status in (401, 403) else 1
+        return 0 if 200 <= status < 300 else 1
     except (OSError, ValueError, http.client.HTTPException):
         return 1
     finally:
