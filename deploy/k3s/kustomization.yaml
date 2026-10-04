@@ -12,4 +12,6 @@ resources:
   - 05-ingress.yaml
 images:
   - name: alvit/inverter-dashboard
-    newTag: sha-f1f7d7f
+    # Set the registry hostname in the ignored local copy before applying.
+    newName: registry.example.invalid/inverter-dashboard
+    digest: sha256:2224fdb1fb02ec31af99ae4be608f784b42c81ed8b6561bff21d95beb329635b

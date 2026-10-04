@@ -53,6 +53,13 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /health/live
