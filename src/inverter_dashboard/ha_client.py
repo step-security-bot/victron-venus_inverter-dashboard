@@ -382,28 +382,34 @@ async def _ha_request(
 
 
 async def _get_state(client: httpx.AsyncClient, headers: dict, entity_id: str) -> str | None:
-    """GET /api/states/{entity_id} → state string."""
+    """Read state; propagate connection failures so the entire poll is invalidated."""
     safe = quote(entity_id, safe="")
+    r = await client.get(f"{_url}/api/states/{safe}", headers=headers)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    if r.status_code != 200:
+        return None
     try:
-        r = await client.get(f"{_url}/api/states/{safe}", headers=headers)
-        if r.status_code != 200:
-            return None
         data = r.json()
         return data.get("state")
-    except (httpx.HTTPError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return None
 
 
 async def _get_full_state(client: httpx.AsyncClient, headers: dict, entity_id: str) -> dict | None:
-    """GET /api/states/{entity_id} → full state doc (state + attributes) or None."""
+    """Read full state; a missing entity is optional, but a failed poll is not."""
     safe = quote(entity_id, safe="")
+    r = await client.get(f"{_url}/api/states/{safe}", headers=headers)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    if r.status_code != 200:
+        return None
     try:
-        r = await client.get(f"{_url}/api/states/{safe}", headers=headers)
-        if r.status_code != 200:
-            return None
         doc = r.json()
         return doc if isinstance(doc, dict) and "entity_id" in doc else None
-    except (httpx.HTTPError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return None
 
 
