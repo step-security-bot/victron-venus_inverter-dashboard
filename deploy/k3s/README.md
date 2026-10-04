@@ -109,6 +109,11 @@ Assistant has fresh data; check `/api/state` separately below. Normal shutdown
 cancels and joins the HA poller, transport tasks, and version check before clearing
 the MQTT client.
 
+The example uses the image's UID/GID1000, a read-only root filesystem and a bounded
+writable `/tmp`. Self-update is disabled; replace the tested image to upgrade.
+The existing mounted configuration remains read-only, so runtime settings cannot
+be persisted into that Secret volume.
+
 Set these variables to your local deployment values:
 
 ```bash

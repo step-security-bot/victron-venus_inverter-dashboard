@@ -14,14 +14,30 @@ spec:
       labels:
         app: inverter-dashboard
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       nodeSelector:
         kubernetes.io/hostname: worker-1
       containers:
         - name: dashboard
           image: alvit/inverter-dashboard:latest
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           # Override Docker's legacy --mqtt-host Cerbo default; respect MQTT_HOST from env.
           args: ["--port", "8080"]
+          env:
+            - name: SELF_UPDATE_ENABLED
+              value: "false"
           ports:
             - name: http
               containerPort: 8080
@@ -35,6 +51,8 @@ spec:
             - name: config
               mountPath: /app/config
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           readinessProbe:
             httpGet:
               path: /health/live
@@ -59,3 +77,6 @@ spec:
         - name: config
           secret:
             secretName: inverter-dashboard-config
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
