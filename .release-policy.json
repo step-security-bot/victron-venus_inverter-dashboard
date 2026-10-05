@@ -62,5 +62,18 @@
     ],
     "toolkit_revision": "fca833a9da6b49116444ffd7ac6739e08f9cbc61"
   },
-  "single_entry_ci": true
+  "single_entry_ci": true,
+  "coverage": {
+    "toolkit_ref": "0582ac703ff47fd0cde42d5fff695c0569ca8392",
+    "reports": [
+      {
+        "name": "python",
+        "workflow": "ci.yml",
+        "job": "ci",
+        "path": "coverage.xml",
+        "format": "cobertura",
+        "required": false
+      }
+    ]
+  }
 }

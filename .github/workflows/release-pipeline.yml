@@ -102,6 +102,7 @@ jobs:
       contents: read
       actions: read
       security-events: write
+      id-token: write
   build:
     needs:
       - prepare
