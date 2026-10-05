@@ -1,22 +1,22 @@
 {
   "schema": 1,
   "repository": "https://github.com/victron-venus/inverter-dashboard-vue",
-  "source_commit": "8127d037f8b51a0b110857cd06fb1d05590e9cf2",
-  "package_version": "2.2.3",
-  "package_lock_sha256": "c2fdb990df419e9e28785bffff124e63ac4ceb29b53520bc07420757ad4433b3",
-  "build_command": "npm ci --ignore-scripts --no-audit --no-fund && npm run build:spa",
+  "source_commit": "e79054130cca49f919c89e6491bb67769882f3ba",
+  "package_version": "2.2.6",
+  "package_lock_sha256": "3f73fc8e24de7660f262f33904846ff777d5b6359bf567832f038dc15b24fa1f",
+  "build_command": "npm ci --ignore-scripts --no-audit --no-fund && npm run build:all",
   "node_version": "v26.8.2",
   "npm_version": "11.19.1",
   "files": [
     {
+      "path": "assets/IntervalEnergy-BniMtCCH.js",
+      "sha256": "188c65ce2f7506a4f1d37fed841fb53b9331bca1e6d47c18ac58f2a9fdbe8e09",
+      "size": 10288
+    },
+    {
       "path": "assets/IntervalEnergy-DZnd1PxA.css",
       "sha256": "e7f34ba776c8465c821faeccfd40203716db53f77b6724a27b6b1a34d943e6e6",
       "size": 1049
-    },
-    {
-      "path": "assets/IntervalEnergy-sA3nP37k.js",
-      "sha256": "90f6dd62c82c5f70075ba1dd03add6e2eb1679589a3331779a14852870744263",
-      "size": 10288
     },
     {
       "path": "assets/TariffEditor-BO5kDYMX.css",
@@ -24,9 +24,9 @@
       "size": 122734
     },
     {
-      "path": "assets/TariffEditor-BQZsgBKl.js",
-      "sha256": "18d6b8a81df2a7522442e9f8999c62ce9b58502296344814ba9f5b8a49941ab3",
-      "size": 6954575
+      "path": "assets/TariffEditor-Dx0UTofW.js",
+      "sha256": "15a9291978b9a2801701c95709fe5e03c188f000b9acda552087fcfda7a4980c",
+      "size": 6622122
     },
     {
       "path": "assets/af-DK_CjRn6-CZxsvT2y.js",
@@ -204,14 +204,14 @@
       "size": 2434
     },
     {
-      "path": "assets/index-D5fho11g.css",
-      "sha256": "a06f49a4fd5cca6178f346f2a201e672342e892107f0a1ad1909b0ea1a87ba66",
-      "size": 28333
+      "path": "assets/index-BTZPxu0l.css",
+      "sha256": "9dd55d33ce5ad858a77f42e9c22fe1b01939a763fb74b9ee128fcfe51c02b4fc",
+      "size": 28356
     },
     {
-      "path": "assets/index-Dm94PJ3R.js",
-      "sha256": "b5fdbecc144051b3f128c1684602e707852be3c06b9e894e563bb41fe7e2ac2a",
-      "size": 169588
+      "path": "assets/index-Bc7OqX69.js",
+      "sha256": "fcc535a868e9e197ed8476ac8a26167b4f9578a77fa406049ad7ed12c4fea9fe",
+      "size": 172436
     },
     {
       "path": "assets/is-BT8UVRze-DWEBuJpb.js",
@@ -440,7 +440,7 @@
     },
     {
       "path": "index.html",
-      "sha256": "9fab4bd88a5c4dc09dd2d58118df0f028437e853c40bb84f9b76d6d2853beac5",
+      "sha256": "098efe365ea624a5087af218e962bf6b163d62ef2a0a1412ad1de37d894de9fd",
       "size": 958
     }
   ]

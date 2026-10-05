@@ -23,7 +23,7 @@ from typing import Any, Literal
 
 import httpx
 
-from . import config
+from . import config, notifications
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +171,24 @@ async def fetch_snapshot(client: httpx.AsyncClient) -> dict[str, Any]:
     data = resp.json()
     if not isinstance(data, dict):
         raise TypeError("gateway snapshot is not a JSON object")
+    platform = data.get("platform")
+    if isinstance(platform, dict):
+        datetime_keys = []
+        for key, raw in platform.items():
+            parsed = notifications.parse_platform_leaf_key(key)
+            value = raw.get("value") if isinstance(raw, dict) else raw
+            if parsed and parsed[2] == "DateTime" and isinstance(value, float):
+                datetime_keys.append(key)
+        if datetime_keys:
+            # Only source DateTime decimals need their exact wire text. Reparse
+            # those leaves without rounding; all other telemetry stays ordinary
+            # JSON numbers rather than introducing Decimal objects into state.
+            exact_platform = resp.json(parse_float=str)["platform"]
+            for key in datetime_keys:
+                if isinstance(platform[key], dict):
+                    platform[key]["value"] = exact_platform[key]["value"]
+                else:
+                    platform[key] = exact_platform[key]
     return data
 
 

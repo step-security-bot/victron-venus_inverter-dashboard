@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.26] - Unreleased
+
+### Fixed
+- Preserve native Victron event times through MQTT and gateway replays, including
+  late timestamp fields. Missing or invalid event times remain unknown.
+- Refresh notification ages while idle and after returning to the page, with the
+  exact local date and timezone available. Replayed history keeps its source time.
+- Keep dismissed alarms hidden when incomplete or invalid timestamps are replayed,
+  and reject fractional timestamp strings without rounding them into fresh events.
+
 ## [1.8.19] - 2026-09-11
 
 ### Fixed

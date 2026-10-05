@@ -12,6 +12,7 @@ Sources:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 PLATFORM_FIELDS = frozenset(
@@ -64,6 +65,29 @@ def _as_str(v: Any) -> str | None:
     if isinstance(v, (int, float, bool)):
         return str(v)
     return None
+
+
+def _event_datetime(value: Any) -> int | None:
+    """Positive, integral Venus Unix seconds; unknown values never become receipt time."""
+    if isinstance(value, bool):
+        return None
+    try:
+        # A near-integer string must not round into a different valid event and
+        # clear its dismissal. Validate it exactly before converting to seconds.
+        numeric = Decimal(value)
+        if (
+            not numeric.is_finite()
+            or numeric <= 0
+            or numeric > 253_402_300_799  # 9999-12-31T23:59:59Z, RFC3339's upper bound
+            or numeric != numeric.to_integral_value()
+        ):
+            return None
+        seconds = int(numeric)
+        # Also reject dates outside the RFC3339 range supported by our clients.
+        datetime.fromtimestamp(seconds, tz=UTC)
+        return seconds
+    except (InvalidOperation, TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def normalize_notification(data: Any) -> dict[str, str] | None:
@@ -130,7 +154,7 @@ def _slot_to_notification(inst: str, slot_n: int, slot: dict[str, Any]) -> dict[
     body = (slot.get("device_name") or slot.get("service") or "").strip()
     ts = ""
     dt = slot.get("date_time")
-    if isinstance(dt, int):
+    if isinstance(dt, int) and dt > 0:
         try:
             ts = datetime.fromtimestamp(dt, tz=UTC).isoformat()
         except (OverflowError, OSError, ValueError):
@@ -162,6 +186,7 @@ def apply_platform_field(
             "device_name": None,
             "service": None,
             "date_time": None,
+            "last_valid_date_time": None,
             "notif_type": None,
             "active": None,
             "acknowledged": None,
@@ -177,9 +202,11 @@ def apply_platform_field(
     elif field == "Service":
         entry["service"] = _as_str(value)
     elif field == "DateTime":
-        next_dt = _as_i64(value)
-        if next_dt is not None and next_dt != entry.get("date_time"):
-            entry["user_dismissed"] = False
+        next_dt = _event_datetime(value)
+        if next_dt is not None:
+            if next_dt != entry.get("last_valid_date_time"):
+                entry["user_dismissed"] = False
+            entry["last_valid_date_time"] = next_dt
         entry["date_time"] = next_dt
     elif field == "Type":
         entry["notif_type"] = _as_i64(value)
@@ -219,12 +246,14 @@ def sync_platform_map(
         for key, slot in slots.items()
         if slot.get("user_dismissed")
     }
-    prev_dates = {key: slot.get("date_time") for key, slot in slots.items()}
+    prev_dates = {key: slot.get("last_valid_date_time") for key, slot in slots.items()}
     slots.clear()
     for key, raw in platform_leaves.items():
         value = raw.get("value") if isinstance(raw, dict) and "value" in raw else raw
         apply_platform_field(slots, key, value)
     for key, slot in slots.items():
+        if slot.get("date_time") is None:
+            slot["last_valid_date_time"] = prev_dates.get(key)
         if not prev_dismissed.get(key):
             continue
         # Fresh event (DateTime changed) clears sticky dismiss — apply_platform_field
@@ -346,16 +375,12 @@ def mqtt_handle_platform_notification(ms: Any, topic: str, payload: bytes) -> bo
     field = parts[6]
     key = f"{inst}/Notifications/{slot_n}/{field}"
     try:
-        raw = json.loads(payload.decode())
+        raw = json.loads(payload.decode(), parse_float=str if field == "DateTime" else float)
     except (ValueError, UnicodeDecodeError):
         return False
     value = raw.get("value") if isinstance(raw, dict) else raw
     ms._platform_seen = True
-    before_ids = {
-        n.get("id")
-        for n in ms.notifications
-        if str(n.get("id", "")).startswith("victron-platform-")
-    }
+    before = [n for n in ms.notifications if str(n.get("id", "")).startswith("victron-platform-")]
     apply_platform_field(ms._platform_slots, key, value)
     visible = notifications_from_platform_slots(ms._platform_slots)
     ms.notifications = [
@@ -363,12 +388,10 @@ def mqtt_handle_platform_notification(ms: Any, topic: str, payload: bytes) -> bo
     ]
     for n in visible:
         mqtt_upsert_notification(ms, n)
-    after_ids = {
-        n.get("id")
-        for n in ms.notifications
-        if str(n.get("id", "")).startswith("victron-platform-")
-    }
-    return before_ids != after_ids
+    after = [n for n in ms.notifications if str(n.get("id", "")).startswith("victron-platform-")]
+    # Fields arrive separately: DateTime/body updates must reach browsers even
+    # when the slot's id and visibility have not changed.
+    return before != after
 
 
 def mqtt_dismiss_notification(ms: Any, nid: str) -> bool:
