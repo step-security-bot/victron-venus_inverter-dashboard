@@ -54,6 +54,46 @@ async def test_partial_old_replay_and_reconnect_keep_source_event_time(native_ev
     assert websocket_handler.build_payload()["notifications"][0]["ts"] == EVENT_TIME
 
 
+@pytest.mark.parametrize("inactive", [False, 0])
+async def test_inactive_unacknowledged_native_warning_remains_visible(native_events, inactive):
+    state, publish = native_events
+    await publish(
+        Description="Internal failure",
+        DeviceName="JBD Battery Chain 1",
+        DateTime=EVENT_SECONDS,
+        Type=1,
+        Active=inactive,
+        Acknowledged=False,
+        Silenced=True,
+    )
+    # GUIv2's inactive notification still needs acknowledgement. Clearing the
+    # physical condition or silencing its buzzer must not erase that warning.
+    assert state.get_notifications() == [
+        {
+            "id": SLOT_ID,
+            "level": "alarm",
+            "title": "Internal failure",
+            "body": "JBD Battery Chain 1",
+            "source": "victron",
+            "ts": EVENT_TIME,
+        }
+    ]
+    await publish(Active=inactive, DateTime=EVENT_SECONDS)
+    assert len(state.get_notifications()) == 1
+    await publish(Acknowledged=True)
+    assert state.get_notifications() == []
+
+
+async def test_dismissed_inactive_warning_is_not_resurrected_by_retained_replay(native_events):
+    state, publish = native_events
+    await publish(Description="Internal failure", DateTime=EVENT_SECONDS, Active=False)
+    state.dismiss_notification(SLOT_ID)
+    await publish(Active=False, DateTime=EVENT_SECONDS, Silenced=True)
+    assert state.get_notifications() == []
+    await publish(DateTime=EVENT_SECONDS + 60)
+    assert state.get_notifications()[0]["ts"] == "2026-10-05T18:48:00+00:00"
+
+
 async def test_late_datetime_is_broadcast_without_waiting_for_other_telemetry(monkeypatch):
     monkeypatch.setattr(server.config, "CERBO_PORTAL_ID", "site")
     state = server.MqttState()

@@ -71,6 +71,8 @@ _MQTT_OWNED_KEYS = (
             "booleans",
             "features",
             "ess_mode",
+            "ess_mode_observed_at",
+            "ess_mode_controls_available",
             "dry_run",
             "daily_stats",
             "solar_forecast",
@@ -143,6 +145,8 @@ def _switch_entity_from_sequence(val: tuple | list) -> tuple[str | None, str | N
 
 def _switch_entity_from_dict(val: dict) -> tuple[str | None, str | None]:
     """Extract (entity, label) from a dict-style value."""
+    if val.get("enabled") is False:
+        return None, None
     eid = val.get("entity") or val.get("id") or val.get("entity_id")
     lab = val.get("label") or val.get("short") or val.get("name")
     entity = str(eid).strip() if eid else None
@@ -167,8 +171,15 @@ def _parse_ha_switch_entities(raw: Any) -> tuple[dict[str, str], dict[str, str]]
     embedded_labels: dict[str, str] = {}
     if not raw or not isinstance(raw, dict):
         return entities, embedded_labels
-    for state_key, val in raw.items():
-        if not state_key:
+
+    def order(item):
+        value = item[1]
+        rank = value.get("order", 0) if isinstance(value, dict) else 0
+        return rank if isinstance(rank, int) and not isinstance(rank, bool) else 0
+
+    # Python's stable sort retains configuration order when ranks are equal.
+    for state_key, val in sorted(raw.items(), key=order):
+        if not isinstance(state_key, str) or not state_key:
             continue
         entity, label = _switch_entity_from_value(val)
         if entity:
@@ -304,7 +315,7 @@ def _default_switch_label(state_key: str) -> str:
 def home_buttons_ui() -> list[dict[str, Any]]:
     """Home card buttons: one row per HA_SWITCH_ENTITIES entry (order preserved)."""
     rows = []
-    for state_key, entity_id in _switch_entities.items():
+    for state_key, entity_id in _ha_fields(_switch_entities):
         label = _switch_labels.get(state_key) or _default_switch_label(state_key)
         btn_id = state_key.replace("_", "-")
         rows.append(
@@ -320,9 +331,19 @@ def home_buttons_ui() -> list[dict[str, Any]]:
 
 def ui_config_patch() -> dict[str, Any]:
     """Partial ui_config from local_config (merged into WebSocket payloads)."""
-    if not _switch_entities:
-        return {}
+    # An empty operator list must also clear legacy buttons in upstream MQTT state.
     return {"home_buttons": home_buttons_ui()}
+
+
+def _home_switch_state(raw: str | None) -> bool | None:
+    """Unknown or unavailable Home state is not an observed off state."""
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in ("on", "true", "yes", "1"):
+            return True
+        if value in ("off", "false", "no", "0"):
+            return False
+    return None
 
 
 def is_toggle_allowed(entity_id: str) -> bool:
@@ -547,7 +568,7 @@ async def fetch_states_once() -> dict[str, Any]:
 
             for key, eid in _ha_fields(_switch_entities):
                 st = await _get_state(client, headers, eid)
-                out[key] = st == "on"
+                out[key] = _home_switch_state(st)
 
             for key, eid in _ha_fields(_appliance_entities):
                 st = await _get_state(client, headers, eid)
@@ -584,6 +605,8 @@ def _apply_connected_overlay(merged: dict[str, Any], o: dict[str, Any]) -> None:
     merged["booleans"] = booleans
     for k, _ in _ha_fields(_switch_entities):
         merged[k] = bool(o.get(k))
+        # Dynamic Home keys survive the state schema through its booleans map.
+        booleans[k] = o.get(k) if isinstance(o.get(k), bool) else None
     for k, _ in _ha_fields(_appliance_entities):
         if k in o:
             merged[k] = o[k]
@@ -602,6 +625,7 @@ def _apply_disconnected_overlay(merged: dict[str, Any]) -> None:
     merged["booleans"] = booleans
     for k, _ in _ha_fields(_switch_entities):
         merged[k] = False
+        booleans[k] = None
     for k, _ in _ha_fields(_appliance_entities):
         merged[k] = _appliance_fallback(k)
 
@@ -611,6 +635,10 @@ def merge_overlay(base: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     merged.setdefault("booleans", {})
     if not is_direct_mode():
+        booleans = dict(merged.get("booleans") or {})
+        for key, _ in _ha_fields(_switch_entities):
+            booleans[key] = None
+        merged["booleans"] = booleans
         return merged
 
     o = _overlay

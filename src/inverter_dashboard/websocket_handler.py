@@ -11,7 +11,7 @@ from aiomqtt import Client
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict
 
-from . import config, gateway, ha_client, settings_store
+from . import config, ess_mode, gateway, ha_client, settings_store
 from .cerbo import number
 from .config import DEFAULT_LOOP_INTERVAL, DEFAULT_POWER_MAX, DEFAULT_POWER_MIN
 from .version import VERSION
@@ -116,6 +116,8 @@ class InverterState(BaseModel):
     # Control
     dry_run: bool | str | None = None
     ess_mode: dict[str, Any] | None = None
+    ess_mode_observed_at: float | None = None
+    ess_mode_controls_available: bool = False
     limits: dict[str, float | int] | None = None
     loop_interval: float | int | None = None
     dvcc_limits: dict[str, Any] | None = None
@@ -312,6 +314,7 @@ def build_payload() -> dict[str, Any]:
             "water_pump_controls_available": _can_control_water("pump"),
             "water_valve_controls_available": _can_control_water("valve"),
             "controller_controls_available": mqtt.controller_available(),
+            "ess_mode_controls_available": _can_select_ess_mode(),
         }
     )
 
@@ -458,9 +461,69 @@ async def _acknowledge_victron_on_cerbo(app_state, mqtt_client: Client | None) -
         logger.exception("MQTT AcknowledgeAll publish failed")
 
 
+def _can_select_ess_mode() -> bool:
+    ms = _state.get("mqtt_state")
+    app = _state.get("app_state")
+    if ms is None or not ms.controller_available():
+        return False
+    remote = gateway.prefer_gateway()
+    if not getattr(app, "gateway_connected" if remote else "mqtt_connected", False):
+        return False
+    if remote and ms.gateway_capabilities.get("set_ess_mode") is not True:
+        return False
+    state = ms.get_state()
+    return ess_mode.telemetry_ready(
+        getattr(ms, "_controller_ess_mode", None),
+        getattr(ms, "_ess_mode_observed_at", None),
+        state.get("dry_run"),
+    )
+
+
+async def _select_ess_mode(data: dict[str, Any], mqtt_client: Client | None) -> None:
+    body = ess_mode.validate_selection(
+        {key: value for key, value in data.items() if key != "action"}
+    )
+    if not _can_select_ess_mode():
+        raise ValueError("Wait for live supported ESS telemetry with dry run disabled")
+    ms = _state.get("mqtt_state")
+    generation = gateway.source_generation()
+
+    async def send_checked() -> None:
+        if gateway.prefer_gateway():
+            async with gateway._new_gateway_client() as client:
+                snapshot = await gateway.fetch_snapshot(client)
+                ess_mode.validate_gateway_snapshot(snapshot)
+            # Identity alone cannot detect an IGW -> MQTT -> IGW round trip.
+            if (
+                generation != gateway.source_generation()
+                or ms is not _state.get("mqtt_state")
+                or not gateway.prefer_gateway()
+                or not _can_select_ess_mode()
+            ):
+                raise ValueError("Connection changed before ESS selection")
+            await gateway.post_command("set_ess_mode", body, expected_generation=generation)
+            return
+        if (
+            mqtt_client is None
+            or generation != gateway.source_generation()
+            or ms is not _state.get("mqtt_state")
+            or mqtt_client is not getattr(_state.get("app_state"), "mqtt_client", None)
+            or not _can_select_ess_mode()
+        ):
+            raise ValueError("Connection or ESS capability changed before selection")
+        # No queue/retry for a later connection, and no optimistic state update.
+        await mqtt_client.publish(
+            "inverter/cmd/set_ess_mode", json.dumps(body), qos=0, retain=False
+        )
+
+    await gateway.run_ess_selection(generation, send_checked)
+
+
 async def _dispatch_action(action: str, data: dict[str, Any], mqtt_client: Client):
     """Dispatch a single WebSocket action."""
-    if action == "water_mode":
+    if action == "set_ess_mode":
+        await _select_ess_mode(data, mqtt_client)
+    elif action == "water_mode":
         await _set_water_mode(data, mqtt_client)
     elif action in ("number_set", "set_cover_position", "media_player", "scene_activate"):
         if not await ha_client.perform_action(action, data.get("entity"), data):
@@ -471,6 +534,8 @@ async def _dispatch_action(action: str, data: dict[str, Any], mqtt_client: Clien
         await broadcast_state()
     elif action == "toggle":
         entity = data.get("entity")
+        if not isinstance(entity, str) or not entity:
+            raise ValueError("Entity is required for toggle")
         flag = _control_flag_key(entity if isinstance(entity, str) else None)
         if flag:
             # Mirror desktop: Cerbo MQTT inverter/cmd/toggle with bare flag key.
@@ -479,6 +544,10 @@ async def _dispatch_action(action: str, data: dict[str, Any], mqtt_client: Clien
                 payload["state"] = data["state"]
             await mqtt_publish(mqtt_client, "toggle", payload)
             return
+        if "." in entity and (
+            not ha_client.is_direct_mode() or not ha_client.is_toggle_allowed(entity)
+        ):
+            raise ValueError("Home entity is not configured for direct Home Assistant control")
         if entity and ha_client.is_direct_mode() and ha_client.is_toggle_allowed(entity):
             if ha_client.domain_for_press(entity):
                 succeeded = await ha_client.press_entity(entity)
@@ -494,6 +563,8 @@ async def _dispatch_action(action: str, data: dict[str, Any], mqtt_client: Clien
         await mqtt_publish(mqtt_client, "toggle", {"entity": entity})
     elif action == "press":
         entity = data.get("entity")
+        if isinstance(entity, str) and "." in entity and not ha_client.is_direct_mode():
+            raise ValueError("Home entity is not configured for direct Home Assistant control")
         if ha_client.is_direct_mode():
             if (
                 not isinstance(entity, str)
@@ -576,7 +647,22 @@ async def handle_websocket(websocket: WebSocket, app_state):
             data = await websocket.receive_json()
             action = data.get("action")
             if action:
-                await _dispatch_action(action, data, app_state.mqtt_client)
+                try:
+                    await _dispatch_action(action, data, app_state.mqtt_client)
+                except Exception:
+                    if action != "set_ess_mode":
+                        raise
+                    await _send_state(
+                        websocket,
+                        json.dumps(
+                            {
+                                "type": "command_error",
+                                "action": action,
+                                "request_id": data.get("request_id"),
+                                "error": "ESS selection was not confirmed; check live connection and retry.",
+                            }
+                        ),
+                    )
 
     except WebSocketDisconnect:
         pass

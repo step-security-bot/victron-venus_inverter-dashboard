@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 import httpx
@@ -38,6 +39,8 @@ StartupSource = Literal["mqtt", "igw", "none"]
 # Exclusive live path selected at startup (and updated on dual-path failover).
 _active_source: StartupSource = "none"
 _dual_path: bool = False
+_source_generation = 0
+_ess_command_tasks: set[asyncio.Task] = set()
 
 
 def gateway_configured() -> bool:
@@ -53,6 +56,7 @@ def mqtt_configured() -> bool:
 def set_active_source(source: StartupSource, *, dual_path: bool = False) -> None:
     """Record the exclusive live path (commands/ack follow this)."""
     global _active_source, _dual_path
+    invalidate_ess_commands()
     _active_source = source
     _dual_path = dual_path and source in ("mqtt", "igw")
 
@@ -60,6 +64,33 @@ def set_active_source(source: StartupSource, *, dual_path: bool = False) -> None
 def active_source() -> StartupSource:
     """Currently selected exclusive data source."""
     return _active_source
+
+
+def source_generation() -> int:
+    return _source_generation
+
+
+def invalidate_ess_commands() -> None:
+    global _source_generation
+    _source_generation += 1
+    for task in tuple(_ess_command_tasks):
+        task.cancel()
+
+
+async def run_ess_selection(generation: int, operation: Callable[[], Awaitable[None]]) -> None:
+    """Cancel an in-flight command check/write when its source is replaced."""
+    if generation != _source_generation:
+        raise ValueError("Connection changed before ESS selection")
+    task = asyncio.create_task(operation())
+    _ess_command_tasks.add(task)
+    try:
+        result = (await asyncio.gather(task, return_exceptions=True))[0]
+        if isinstance(result, asyncio.CancelledError) and generation != _source_generation:
+            raise ValueError("Connection changed during ESS selection") from None
+        if isinstance(result, BaseException):
+            raise result
+    finally:
+        _ess_command_tasks.discard(task)
 
 
 def dual_path_enabled() -> bool:
@@ -192,12 +223,16 @@ async def fetch_snapshot(client: httpx.AsyncClient) -> dict[str, Any]:
     return data
 
 
-async def post_command(name: str, body: dict[str, Any] | None = None) -> None:
+async def post_command(
+    name: str, body: dict[str, Any] | None = None, *, expected_generation: int | None = None
+) -> None:
     """POST /v1/commands/{name} (whitelist only on the gateway)."""
     base = config.validate_gateway_url(config.GATEWAY_URL)
     url = f"{base}/v1/commands/{name.strip('/')}"
     headers = build_headers()
     async with _new_gateway_client() as client:
+        if expected_generation is not None and expected_generation != _source_generation:
+            raise ValueError("Connection changed before ESS selection")
         resp = await client.post(url, headers=headers, json=body or {}, follow_redirects=False)
         resp.raise_for_status()
 

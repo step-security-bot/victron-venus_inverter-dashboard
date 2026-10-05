@@ -251,8 +251,8 @@ class TestBuildPayloadContract:
 @pytest.mark.asyncio
 async def test_toggle_action_publishes_mqtt():
     client = FakeMqttClient()
-    await _dispatch_action("toggle", {"entity": "switch.boiler"}, client)
-    assert ("inverter/cmd/toggle", '{"entity": "switch.boiler"}') in client.published
+    await _dispatch_action("toggle", {"entity": "only_charging"}, client)
+    assert ("inverter/cmd/toggle", '{"entity": "only_charging"}') in client.published
 
 
 async def test_toggle_control_flag_uses_bare_key():
@@ -263,10 +263,11 @@ async def test_toggle_control_flag_uses_bare_key():
 
 
 @pytest.mark.asyncio
-async def test_press_action_publishes_mqtt():
+async def test_press_action_rejects_unconfigured_home_entity():
     client = FakeMqttClient()
-    await _dispatch_action("press", {"entity": "button.reset"}, client)
-    assert ("inverter/cmd/press", '{"entity": "button.reset"}') in client.published
+    with pytest.raises(ValueError):
+        await _dispatch_action("press", {"entity": "button.reset"}, client)
+    assert client.published == []
 
 
 @pytest.mark.asyncio
@@ -431,12 +432,12 @@ class TestWebSocketEndpoint:
             client = TestClient(server.app)
             with client.websocket_connect("/ws") as ws:
                 ws.receive_json()  # consume initial payload
-                ws.send_json({"action": "toggle", "entity": "switch.x"})
+                ws.send_json({"action": "toggle", "entity": "only_charging"})
                 # give server loop a chance to dispatch
                 import time
 
                 time.sleep(0.05)
-            assert ("inverter/cmd/toggle", '{"entity": "switch.x"}') in tracked.published
+            assert ("inverter/cmd/toggle", '{"entity": "only_charging"}') in tracked.published
         finally:
             wsh.ws_clients.update(ws_clients_orig)
             wsh._state["mqtt_state"] = None

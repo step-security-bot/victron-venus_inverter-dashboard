@@ -54,14 +54,12 @@ HA_BOOLEAN_ENTITIES = {
 # Each value may be:
 #   - entity id string: "switch.foo"
 #   - (entity_id, "Short label") tuple
-#   - dict: {"entity": "switch.foo", "label": "Short"}  (keys "short" / "name" also work for label)
+#   - dict: {"entity": "switch.example", "label": "Short", "order": 0, "enabled": True}
+#     (keys "short" / "name" also work for label)
 # Supported domains include switch.* and light.* (toggle via HA REST when HA_DIRECT_CONTROLS).
-HA_SWITCH_ENTITIES = {
-    "home_recliner": ("switch.recliner_recliner", "Recliner"),
-    "home_garage": ("switch.garage_opener_l", "Garage"),
-    "laundry_outlet": ("switch.laundry_zigbee_switch", "Laundry"),
-    "garage_light": {"entity": "light.garage", "label": "Garage light"},
-}
+# Empty means no Home buttons. Equal orders preserve declaration order; disabled
+# entries are neither displayed nor polled nor permitted as Home toggle targets.
+HA_SWITCH_ENTITIES = {}
 
 # Optional extra overrides if you still use plain string values above (HA_SWITCH_LABELS wins over embedded labels).
 HA_SWITCH_LABELS = {}

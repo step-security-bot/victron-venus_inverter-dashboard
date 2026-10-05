@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, gateway, ha_client, notifications, settings_store, websocket_handler
+from . import config, ess_mode, gateway, ha_client, notifications, settings_store, websocket_handler
 from .cerbo import (
     CERBO_KINDS,
     CERBO_OWNED_KEYS,
@@ -102,6 +102,8 @@ class MqttState(CerboOverlayMixin):
         self.gateway_capabilities: dict[str, Any] = {}
         self._daemon_keys: set[str] = set()
         self._daemon_received_at: float | None = None
+        self._controller_ess_mode: dict[str, Any] | None = None
+        self._ess_mode_observed_at: float | None = None
         self._alarm_values: dict[str, int] = {}
         # Venus-platform GUIv2 notification slots (desktop parity)
         self._platform_slots: dict[tuple[str, int], dict[str, Any]] = {}
@@ -125,7 +127,7 @@ class MqttState(CerboOverlayMixin):
         if self._on_state_update:
             await self._on_state_update()
 
-    def _merge_daemon_state(self, incoming: dict[str, Any]) -> None:
+    def _merge_daemon_state(self, incoming: dict[str, Any], *, retained: bool = False) -> None:
         """Non-destructive merge of slim inverter/state into current_state.
 
         EV, water, Active Loads and bank SoC always belong to native Cerbo. Other
@@ -135,30 +137,39 @@ class MqttState(CerboOverlayMixin):
         to flash then disappear.
         """
         self._daemon_received_at = time.monotonic()
-        self._daemon_keys.update(incoming.keys() - NATIVE_SECTION_KEYS)
+        self._daemon_keys.update(incoming.keys() - NATIVE_SECTION_KEYS - ess_mode.SERVER_FIELDS)
+        if "ess_mode" in incoming:
+            mode = incoming["ess_mode"]
+            self._controller_ess_mode = dict(mode) if isinstance(mode, dict) else None
+            self._ess_mode_observed_at = (
+                time.time() if isinstance(mode, dict) and not retained else None
+            )
         for key, value in incoming.items():
-            if key in NATIVE_SECTION_KEYS:
-                continue
-            if key in CERBO_OWNED_KEYS and self._cerbo_has_overlay(key):
-                continue
-            if key == "booleans":
-                if not isinstance(value, dict):
-                    self.current_state[key] = None
-                    continue
-                coerced = dict(self.current_state.get("booleans") or {})
-                for bk, bv in value.items():
-                    coerced[bk] = websocket_handler.control_boolean(bv)
-                self.current_state[key] = coerced
-                continue
-            self.current_state[key] = value
+            self._merge_daemon_field(key, value)
         # Re-apply durable Cerbo maps so slim ticks cannot blank live tiles.
         self._apply_cerbo_overlays()
+
+    def _merge_daemon_field(self, key: str, value: Any) -> None:
+        if key in NATIVE_SECTION_KEYS or key in ess_mode.SERVER_FIELDS:
+            return
+        if key in CERBO_OWNED_KEYS and self._cerbo_has_overlay(key):
+            return
+        self.current_state[key] = self._coerced_booleans(value) if key == "booleans" else value
+
+    def _coerced_booleans(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        result = dict(self.current_state.get("booleans") or {})
+        result.update({key: websocket_handler.control_boolean(v) for key, v in value.items()})
+        return result
 
     def clear_daemon_state(self) -> None:
         """Invalidate controller observations without inventing disabled flags."""
         for key in self._daemon_keys:
             self.current_state[key] = None
         self._daemon_received_at = None
+        self._controller_ess_mode = None
+        self._ess_mode_observed_at = None
         self._apply_cerbo_overlays()
 
     def controller_available(self) -> bool:
@@ -185,73 +196,69 @@ class MqttState(CerboOverlayMixin):
         self._portal_id = portal
         logger.info("Discovered Cerbo portal ID: %s", portal)
 
-    async def on_message(self, topic: str, payload: bytes) -> None:
+    async def on_message(self, topic: str, payload: bytes, *, retained: bool = False) -> None:
         """Process incoming MQTT message"""
         try:
-            if topic.startswith("N/"):
-                parts = topic.split("/")
-                if len(parts) < 3:
-                    return
-                # Discovery can come from system Serial, heartbeat, or an
-                # already streaming native leaf. Selection then stays fixed.
-                if (
-                    not self._portal_id
-                    and payload
-                    and (len(parts) >= 5 or parts[2] in ("heartbeat", "keepalive"))
-                ):
-                    try:
-                        discovery = json.loads(payload)
-                    except (ValueError, UnicodeDecodeError):
-                        return
-                    value = discovery.get("value") if isinstance(discovery, dict) else None
-                    if (isinstance(value, str) and value.strip()) or number(value) is not None:
-                        await self._discover_portal(parts[1])
-                if parts[1] != self._portal_id:
-                    return
-            if topic == "inverter/state":
-                data = json.loads(payload.decode()) if payload else None
-                if data is None:
-                    self.clear_daemon_state()
-                    await self._emit()
-                if isinstance(data, dict):
-                    self._merge_daemon_state(data)
-                    await self._emit()
-
-            elif topic == "inverter/portal":
-                await self._discover_portal(payload.decode().strip().strip('"'))
-
-            elif topic == "inverter/notifications":
-                self.push_notification(json.loads(payload.decode()))
-                if self._on_state_update:
-                    await self._on_state_update()
-
-            elif "/platform/" in topic and "/Notifications/" in topic:
-                changed = self.handle_platform_notification(topic, payload)
-                if changed and self._on_state_update:
-                    await self._on_state_update()
-
-            elif "/Alarms/" in topic:
-                # Desktop suppresses raw Alarms once platform Notifications arrive.
-                if self._platform_seen:
-                    return
-                changed = self.handle_alarm(topic, payload)
-                if changed and self._on_state_update:
-                    await self._on_state_update()
-
-            elif config.CAMERA_TOPIC and fnmatch.fnmatch(
-                topic, config.CAMERA_TOPIC.replace("+", "*")
-            ):
-                self.handle_camera_event(payload)
-                if self.camera_event and self._on_state_update:
-                    await self._on_state_update()
-
-            elif topic.startswith("N/"):
-                if self._handle_cerbo_device(topic, payload):
-                    await self._emit()
+            if await self._native_topic_selected(topic, payload):
+                await self._dispatch_mqtt_message(topic, payload, retained=retained)
         except (json.JSONDecodeError, UnicodeDecodeError):
             logger.exception("MQTT message parse error")
         except Exception:
             logger.exception("MQTT message error")
+
+    async def _native_topic_selected(self, topic: str, payload: bytes) -> bool:
+        if not topic.startswith("N/"):
+            return True
+        parts = topic.split("/")
+        if len(parts) < 3:
+            return False
+        # Discovery can come from system Serial, heartbeat, or a native leaf.
+        if (
+            not self._portal_id
+            and payload
+            and (len(parts) >= 5 or parts[2] in ("heartbeat", "keepalive"))
+        ):
+            try:
+                discovery = json.loads(payload)
+            except (ValueError, UnicodeDecodeError):
+                return False
+            value = discovery.get("value") if isinstance(discovery, dict) else None
+            if (isinstance(value, str) and value.strip()) or number(value) is not None:
+                await self._discover_portal(parts[1])
+        return parts[1] == self._portal_id
+
+    async def _dispatch_mqtt_message(self, topic: str, payload: bytes, *, retained: bool) -> None:
+        if topic == "inverter/state":
+            await self._handle_daemon_message(payload, retained=retained)
+        elif topic == "inverter/portal":
+            await self._discover_portal(payload.decode().strip().strip('"'))
+        elif topic == "inverter/notifications":
+            self.push_notification(json.loads(payload.decode()))
+            await self._emit()
+        elif self._apply_native_message(topic, payload):
+            await self._emit()
+
+    async def _handle_daemon_message(self, payload: bytes, *, retained: bool) -> None:
+        data = json.loads(payload.decode()) if payload else None
+        if data is None:
+            self.clear_daemon_state()
+            await self._emit()
+        elif isinstance(data, dict):
+            self._merge_daemon_state(data, retained=retained)
+            await self._emit()
+
+    def _apply_native_message(self, topic: str, payload: bytes) -> bool:
+        if "/platform/" in topic and "/Notifications/" in topic:
+            return self.handle_platform_notification(topic, payload)
+        if "/Alarms/" in topic:
+            # Desktop suppresses raw Alarms once platform Notifications arrive.
+            return not self._platform_seen and self.handle_alarm(topic, payload)
+        if config.CAMERA_TOPIC and fnmatch.fnmatch(topic, config.CAMERA_TOPIC.replace("+", "*")):
+            self.handle_camera_event(payload)
+            return bool(self.camera_event)
+        if topic.startswith("N/"):
+            return self._handle_cerbo_device(topic, payload)
+        return False
 
     def push_notification(self, data: Any) -> None:
         """Upsert a notification (MqttNotification shape — desktop / alert-bridge)."""
@@ -341,7 +348,17 @@ class MqttState(CerboOverlayMixin):
     def get_state(self) -> dict[str, Any]:
         """Get current state"""
         self.controller_available()
-        return self.current_state
+        result = dict(self.current_state)
+        if (
+            self._controller_ess_mode is not None
+            and self._controller_ess_mode.get("selection_supported") is True
+        ):
+            # Controller status carries the explicit selection and request ack;
+            # the simpler native Hub4 display must not discard these fields.
+            result["ess_mode"] = dict(self._controller_ess_mode)
+        if result:
+            result["ess_mode_observed_at"] = self._ess_mode_observed_at
+        return result
 
     def get_notifications(self) -> list[dict[str, Any]]:
         """Get notification list (inverter-control pushes + alarm transitions)."""
@@ -556,7 +573,9 @@ def _start_mqtt_client():
                     )
                     delay = max(config.MQTT_RECONNECT_MIN, 0.1)
                     async for message in _app_state.mqtt_client.messages:
-                        await ms.on_message(message.topic.value, message.payload)
+                        await ms.on_message(
+                            message.topic.value, message.payload, retained=bool(message.retain)
+                        )
             except asyncio.CancelledError:
                 raise
             except MqttError:
@@ -612,6 +631,7 @@ def _start_version_check():
 
 async def _shutdown_tasks(ha_task, version_task=None):
     """Cancel and await all background tasks."""
+    gateway.invalidate_ess_commands()
     tasks = [task for task in (ha_task, version_task) if task is not None]
     tasks.extend(_app_state.mqtt_tasks)
     _app_state.mqtt_tasks.clear()
@@ -639,6 +659,7 @@ async def _cancel_data_source_tasks() -> None:
     Skips ``asyncio.current_task()`` so a dual-path failover/recovery coroutine
     can replace sibling transports without cancelling itself.
     """
+    gateway.invalidate_ess_commands()
     current = asyncio.current_task()
     tasks = [t for t in _app_state.mqtt_tasks if t is not current]
     _app_state.mqtt_tasks.clear()

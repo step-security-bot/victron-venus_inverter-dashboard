@@ -93,7 +93,7 @@ async def test_missing_entity_keeps_poll_connected_and_continues(ha_transport, m
     assert overlay["ha_direct_connected"] is True
     assert requested == entities
     if reader == "state":
-        assert overlay["home_missing"] is False
+        assert overlay["home_missing"] is None
         assert overlay["home_light"] is True
     else:
         assert [doc["entity_id"] for doc in overlay["ha_filtered"]["sensors"]] == entities[1:]
@@ -123,7 +123,10 @@ async def test_poll_recovers_and_preserves_cerbo_ownership(ha_transport, monkeyp
         ha_client.replace_overlay(overlay)
         merged = ha_client.merge_overlay(base)
         assert merged["ha_direct_connected"] is healthy
-        assert merged["booleans"] == original["booleans"]
+        expected_booleans = dict(original["booleans"])
+        if reader == "state":
+            expected_booleans["home_light"] = True if healthy else None
+        assert merged["booleans"] == expected_booleans
         assert merged["battery_soc"] == original["battery_soc"]
         assert base == original
         if healthy:

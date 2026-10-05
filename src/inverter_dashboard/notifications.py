@@ -138,10 +138,8 @@ def _slot_level(notif_type: int | None) -> str:
 
 
 def _slot_should_show(slot: dict[str, Any]) -> bool:
-    """Mirror desktop PlatformNotifSlot::should_show (+ hide Active=false)."""
+    """Mirror desktop: cleared conditions still need acknowledgement in GUIv2."""
     if slot.get("user_dismissed") or slot.get("acknowledged"):
-        return False
-    if slot.get("active") is False:
         return False
     desc = (slot.get("description") or "").strip()
     return bool(desc)
@@ -212,7 +210,7 @@ def apply_platform_field(
         entry["notif_type"] = _as_i64(value)
     elif field == "Active":
         entry["active"] = _as_bool(value)
-        if entry["active"] is False:
+        if entry["active"] is False and before.get("active") is True:
             entry["user_dismissed"] = False
     elif field == "Acknowledged":
         entry["acknowledged"] = _as_bool(value)
