@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/victron-venus/inverter-dashboard-vue",
-  "source_commit": "43f8f0ef269d839f6c757342ce4fc01ffd351995",
+  "source_commit": "29eb1434161de8b84b3f9bdd9e46962fdc5123cc",
   "package_version": "2.2.7",
   "package_lock_sha256": "53bc7a8cca9e8ec435b5927307622422368db89abe62fa2d135fcd8eda85cf7c",
   "build_command": "npm run build:all",
@@ -9,14 +9,14 @@
   "npm_version": "11.19.1",
   "files": [
     {
+      "path": "assets/IntervalEnergy-CrpDlXpr.js",
+      "sha256": "cdfcbd63a487865db81465bc1599fe9aeb3cec05aa5661ced144e881b33b1ff1",
+      "size": 10293
+    },
+    {
       "path": "assets/IntervalEnergy-DZnd1PxA.css",
       "sha256": "e7f34ba776c8465c821faeccfd40203716db53f77b6724a27b6b1a34d943e6e6",
       "size": 1049
-    },
-    {
-      "path": "assets/IntervalEnergy-ZY8wOE4x.js",
-      "sha256": "1ca53890c3fb1eef063c1dab26dd320be98ee81279ae40a540b0a4ec66d04c5a",
-      "size": 10293
     },
     {
       "path": "assets/TariffEditor-BO5kDYMX.css",
@@ -24,8 +24,8 @@
       "size": 122734
     },
     {
-      "path": "assets/TariffEditor-D65WmMKK.js",
-      "sha256": "093aa0b4be84c5a7cdb474810ce9ddad38ae955da3f5f03452807e9bc5e7bb17",
+      "path": "assets/TariffEditor-DZe44jKF.js",
+      "sha256": "3d0debf75d19fea84900d3172d0ef2a5ae12e8cf47e5d5b26f5d44b0eff79cfa",
       "size": 6622117
     },
     {
@@ -209,9 +209,9 @@
       "size": 31217
     },
     {
-      "path": "assets/index-CiFoFLYo.js",
-      "sha256": "b68701a47dda16dc6c72c400453fb2de80847608bf79675520c13a1988c4dd60",
-      "size": 183063
+      "path": "assets/index-OaeqKW_i.js",
+      "sha256": "dc75027e0c7547d979270fc188bfd8fd1cac56d5569fa12047dc6d367964f51b",
+      "size": 183065
     },
     {
       "path": "assets/is-BT8UVRze-DWEBuJpb.js",
@@ -440,7 +440,7 @@
     },
     {
       "path": "index.html",
-      "sha256": "97ffbc5f336489b63030f671eb0d42f724ffd7315eb55e7dc7be470093933186",
+      "sha256": "39303a7ca1ab39daddfdf52bd985344615ed1c9852ca3f2818854dc1eb56a037",
       "size": 958
     }
   ]
