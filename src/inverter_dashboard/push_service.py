@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import platform
 import sqlite3
 import time
 import uuid
@@ -33,6 +34,7 @@ class PushService:
 
     def __init__(self, directory: Path, subject: str):
         self.available = False
+        self.unavailable_reason = "storage_unavailable"
         self.store = None
         self.transport = None
         self.processor = None
@@ -40,6 +42,13 @@ class PushService:
         self.workers: list[asyncio.Task] = []
         self.inflight: dict[asyncio.Task, tuple[str, str]] = {}
         self.test_times: deque[float] = deque()
+        # Current cryptography has no Intel macOS wheels. The optional sender
+        # must not prevent the dashboard from importing or starting there.
+        if platform.system() == "Windows" or (
+            platform.system() == "Darwin" and platform.machine() == "x86_64"
+        ):
+            self.unavailable_reason = "unsupported_platform"
+            return
         try:
             self.store = PushStore(directory)
             self.transport = PushTransport(self.store, subject)
@@ -243,7 +252,7 @@ class PushService:
         return {
             "enabled": True,
             "available": self.available,
-            "reason": None if self.available else "storage_unavailable",
+            "reason": None if self.available else self.unavailable_reason,
             "publicKey": self.transport.public_key if self.available else None,
             "preferencesDefaults": dict(DEFAULT_PREFERENCES),
             "maxNotificationAgeSeconds": 300,

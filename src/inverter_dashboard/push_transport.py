@@ -14,10 +14,6 @@ from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp.abc import AbstractResolver
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from py_vapid import Vapid
-from pywebpush import WebPusher
 
 from .push_store import PushStore
 
@@ -79,6 +75,8 @@ def _decode_key(value: object, size: int) -> bytes:
 
 def validate_subscription(value: object) -> dict:
     """Return only the standard endpoint and encryption keys, without echoing errors."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+
     if not isinstance(value, dict):
         raise TypeError("Invalid push subscription")
     endpoint = value.get("endpoint")
@@ -139,6 +137,8 @@ class PushTransport:
     """Library-owned RFC8291 encryption and RFC8292 VAPID; no payload or key logs."""
 
     def __init__(self, store: PushStore, subject: str):
+        from py_vapid import Vapid
+
         raw = store.metadata("vapid_private_pem")
         if raw is None:
             if not store.new_database:
@@ -151,12 +151,16 @@ class PushTransport:
 
     @property
     def public_key(self) -> str:
+        from cryptography.hazmat.primitives import serialization
+
         public = self.vapid.public_key.public_bytes(
             serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
         )
         return base64.urlsafe_b64encode(public).decode().rstrip("=")
 
     async def send(self, subscription: dict, payload: dict, now: float) -> int:
+        from pywebpush import WebPusher
+
         subscription = validate_subscription(subscription)
         host = endpoint_host(subscription["endpoint"])
         data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()

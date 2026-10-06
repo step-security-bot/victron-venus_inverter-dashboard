@@ -643,9 +643,14 @@ static resources with no-cache headers. The worker has no fetch handler, command
 actions or asset cache. A notification click opens the dashboard root and does
 not acknowledge an alarm or control any device.
 
-The server-side private store is currently supported on Unix hosts. On Windows,
-the backend reports Web Push unavailable and continues normal dashboard operation;
-Windows browsers can still subscribe to a supported Unix-hosted dashboard.
+Server-side Web Push is supported on Linux and macOS Apple Silicon hosts with a
+private Unix store. On Windows and Intel macOS, its status API explicitly reports
+`unsupported_platform` and the regular dashboard, telemetry and in-app banners
+remain available. Intel macOS packages omit the optional sender dependencies:
+current cryptography releases no longer publish Intel macOS wheels, and the
+dashboard keeps its secure dependency version and `--no-build` packaging policy.
+Browsers on Windows and Intel macOS can still receive Web Push from a supported
+server such as the Linux deployment in k3s.
 
 The only dependency without an official wheel is `http-ece==1.2.1`. Its reviewed
 pure-Python wheel and original source archive are under `vendor/http-ece/` with
