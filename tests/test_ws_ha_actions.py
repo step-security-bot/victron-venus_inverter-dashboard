@@ -34,6 +34,22 @@ def ha_actions(monkeypatch):
     mqtt_publish = AsyncMock()
     monkeypatch.setattr(websocket_handler, "mqtt_publish", mqtt_publish)
     monkeypatch.setattr(ha_client, "_overlay", {})
+    monkeypatch.setattr(ha_client, "_overlay_observed_at", None)
+    monkeypatch.setattr(ha_client, "_overlay_observed_monotonic", None)
+    ha_client.replace_overlay(
+        {
+            "ha_direct_connected": True,
+            "ha_filtered": {
+                "numbers": [
+                    {"entity_id": entity, "min": 0, "max": 100}
+                    for entity in ("number.limit", "input_number.helper")
+                ],
+                "covers": [{"entity_id": "cover.blind", "position": 50}],
+                "media_players": [{"entity_id": "media_player.radio", "state": "playing"}],
+                "scenes": [{"entity_id": "scene.evening"}],
+            },
+        }
+    )
     return mqtt_publish
 
 
@@ -123,3 +139,34 @@ async def test_failed_direct_action_does_not_fall_back_to_daemon(ha_actions, mon
     with pytest.raises(RuntimeError):
         await websocket_handler._dispatch_action("press", {"entity": "button.washer_start"}, None)
     ha_actions.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["offline", "stale", "unobserved", "missing_entity"])
+async def test_rich_actions_fail_closed_on_stale_or_missing_ha_state(ha_actions, monkeypatch, case):
+    import time
+
+    if case == "offline":
+        ha_client.replace_overlay({"ha_direct_connected": False})
+    elif case == "stale":
+        monkeypatch.setattr(ha_client, "_overlay_observed_monotonic", time.monotonic() - 31)
+    elif case == "unobserved":
+        monkeypatch.setattr(ha_client, "_overlay_observed_monotonic", None)
+    else:
+        ha_client.replace_overlay({"ha_direct_connected": True, "ha_filtered": {}})
+    request = AsyncMock()
+    monkeypatch.setattr(ha_client, "_ha_request", request)
+    with pytest.raises(ValueError):
+        await websocket_handler._dispatch_action(
+            "scene_activate", {"entity": "scene.evening"}, None
+        )
+    request.assert_not_called()
+
+
+async def test_number_range_is_revalidated_against_current_metadata(ha_actions, monkeypatch):
+    request = AsyncMock()
+    monkeypatch.setattr(ha_client, "_ha_request", request)
+    with pytest.raises(ValueError, match="range"):
+        await websocket_handler._dispatch_action(
+            "number_set", {"entity": "number.limit", "value": 101}, None
+        )
+    request.assert_not_called()

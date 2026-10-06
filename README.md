@@ -669,3 +669,22 @@ contain path separators or traverse symlinks.
 The build fixes `SOURCE_DATE_EPOCH`, installs only hash-checked offline tools,
 and compares every packaged runtime Python file with the upstream source. The
 upstream MIT license, omitted from its sdist, is included as wheel metadata.
+
+
+Dashboard UI preferences can use a durable file independent of read-only
+connection configuration: set `INVERTER_DASHBOARD_SETTINGS_FILE` to an absolute
+path such as `/var/lib/inverter-dashboard/settings/dashboard_settings.json`.
+The default location beside `local_config.py` is unchanged. New explicit parent
+directories use mode `0700`; writes use a private `0600` temporary file and atomic
+replacement, followed by a directory sync on POSIX systems. Masked secret values returned by the settings API preserve existing
+credentials when submitted unchanged. Settings mutations require JSON and reject
+cross-origin browser requests; native clients retain the existing authentication.
+
+Controller commands require a current connection and fresh non-retained support.
+Native water Mode is refreshed with bounded read requests for the configured
+pump and valve every 20 seconds. Setpoint Override is a controller-owned
+persistent override, including an explicit stop (`null`), and is independent of
+DRY mode. The dashboard sends once, requires matching request ID and exact value
+with no error within one five-second deadline, and never retries on a replacement
+connection. Controller tariff editing preserves revision-based concurrency and
+requires authoritative acknowledgement before the editor reports a saved plan.

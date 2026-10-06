@@ -115,7 +115,8 @@ async def test_ws_set_settings_action_persists_and_applies():
     assert websocket_handler.get_ui_settings()["show_ev"] is False
     assert settings_store.load_settings()["show_ev"] is False
 
-    # invalid patch ignored
-    await _dispatch_action("set_settings", {"nope": True}, FakeMqttClient())
+    # Invalid patches are rejected so correlated callers receive an error.
+    with pytest.raises(ValueError):
+        await _dispatch_action("set_settings", {"nope": True}, FakeMqttClient())
     assert "nope" not in websocket_handler.get_ui_settings()
     assert json.dumps(saved) is not None  # silence unused

@@ -7,12 +7,13 @@ Covers:
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from inverter_dashboard import server, websocket_handler
+from inverter_dashboard import gateway, server, websocket_handler
 from inverter_dashboard.server import MqttState
 from inverter_dashboard.websocket_handler import InverterState, _dispatch_action
 
@@ -243,52 +244,74 @@ class TestBuildPayloadContract:
         assert validated.inverter_state == " charger"
 
 
+def _activate_controller(monkeypatch, client):
+    ms = MqttState()
+    ms._merge_daemon_state({"booleans": {"only_charging": False}, "dry_run": False})
+    app = SimpleNamespace(
+        mqtt_client=client,
+        mqtt_state=ms,
+        mqtt_connected=True,
+        gateway_connected=False,
+        data_source="mqtt",
+    )
+    monkeypatch.setitem(websocket_handler._state, "mqtt_state", ms)
+    monkeypatch.setitem(websocket_handler._state, "app_state", app)
+    monkeypatch.setattr(gateway, "prefer_gateway", lambda: False)
+    return app
+
+
 # ---------------------------------------------------------------------------
 # WebSocket action dispatch contract
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_toggle_action_publishes_mqtt():
+async def test_toggle_action_publishes_mqtt(monkeypatch):
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("toggle", {"entity": "only_charging"}, client)
     assert ("inverter/cmd/toggle", '{"entity": "only_charging"}') in client.published
 
 
-async def test_toggle_control_flag_uses_bare_key():
+async def test_toggle_control_flag_uses_bare_key(monkeypatch):
     """Header flags must hit Cerbo MQTT with bare keys, not HA entity ids."""
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("toggle", {"entity": "input_boolean.minimize_charging"}, client)
     assert ("inverter/cmd/toggle", '{"entity": "minimize_charging"}') in client.published
 
 
 @pytest.mark.asyncio
-async def test_press_action_rejects_unconfigured_home_entity():
+async def test_press_action_rejects_unconfigured_home_entity(monkeypatch):
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     with pytest.raises(ValueError):
         await _dispatch_action("press", {"entity": "button.reset"}, client)
     assert client.published == []
 
 
 @pytest.mark.asyncio
-async def test_setpoint_action_publishes_mqtt():
+async def test_setpoint_action_publishes_mqtt(monkeypatch):
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("setpoint", {"value": 1500}, client)
     assert ("inverter/cmd/setpoint", '{"value": 1500}') in client.published
 
 
 @pytest.mark.asyncio
-async def test_dry_run_action_publishes_mqtt():
+async def test_dry_run_action_publishes_mqtt(monkeypatch):
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("dry_run", {}, client)
     assert ("inverter/cmd/dry_run", "") in client.published
 
 
 @pytest.mark.asyncio
-async def test_limits_action_publishes_mqtt_with_defaults():
+async def test_limits_action_publishes_mqtt_with_defaults(monkeypatch):
     from inverter_dashboard.config import DEFAULT_POWER_MAX, DEFAULT_POWER_MIN
 
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("limits", {}, client)  # no explicit min/max
     _, msg = next((t, m) for t, m in client.published if "limits" in t)
     payload = json.loads(msg)
@@ -297,8 +320,9 @@ async def test_limits_action_publishes_mqtt_with_defaults():
 
 
 @pytest.mark.asyncio
-async def test_limits_action_publishes_mqtt_with_explicit_values():
+async def test_limits_action_publishes_mqtt_with_explicit_values(monkeypatch):
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("limits", {"min": -1000, "max": 3000}, client)
     _, msg = next((t, m) for t, m in client.published if "limits" in t)
     payload = json.loads(msg)
@@ -307,17 +331,19 @@ async def test_limits_action_publishes_mqtt_with_explicit_values():
 
 
 @pytest.mark.asyncio
-async def test_ess_mode_action_publishes_mqtt():
+async def test_ess_mode_action_publishes_mqtt(monkeypatch):
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("ess_mode", {}, client)
     assert ("inverter/cmd/ess_mode", "") in client.published
 
 
 @pytest.mark.asyncio
-async def test_loop_interval_action_publishes_mqtt():
+async def test_loop_interval_action_publishes_mqtt(monkeypatch):
     from inverter_dashboard.config import DEFAULT_LOOP_INTERVAL
 
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("loop_interval", {}, client)  # default interval
     _, msg = next((t, m) for t, m in client.published if "loop_interval" in t)
     payload = json.loads(msg)
@@ -325,8 +351,9 @@ async def test_loop_interval_action_publishes_mqtt():
 
 
 @pytest.mark.asyncio
-async def test_loop_interval_action_publishes_custom_interval():
+async def test_loop_interval_action_publishes_custom_interval(monkeypatch):
     client = FakeMqttClient()
+    _activate_controller(monkeypatch, client)
     await _dispatch_action("loop_interval", {"interval": 30}, client)
     _, msg = next((t, m) for t, m in client.published if "loop_interval" in t)
     payload = json.loads(msg)
@@ -334,11 +361,12 @@ async def test_loop_interval_action_publishes_custom_interval():
 
 
 @pytest.mark.asyncio
-async def test_unknown_action_ignored():
-    """Unknown actions must not raise — silent no-op per contract."""
+async def test_unknown_action_rejected(monkeypatch):
+    """Unsupported commands must not receive a false accepted reply."""
     client = FakeMqttClient()
-    # must not raise
-    await _dispatch_action("not_a_real_action", {"data": 123}, client)
+    _activate_controller(monkeypatch, client)
+    with pytest.raises(ValueError):
+        await _dispatch_action("not_a_real_action", {"data": 123}, client)
     assert not client.published
 
 
@@ -423,8 +451,7 @@ class TestWebSocketEndpoint:
         wsh.ws_clients.clear()
 
         tracked = FakeMqttClient()
-        app_state = FakeAppState()
-        app_state.mqtt_client = tracked
+        app_state = _activate_controller(monkeypatch, tracked)
 
         try:
             monkeypatch.setattr(server, "DASHBOARD_SECRET", "")

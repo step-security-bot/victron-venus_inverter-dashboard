@@ -1,10 +1,10 @@
 {
   "package": "inverter-dashboard-vue",
-  "version": "2.2.7-beta.8",
+  "version": "2.2.7-beta.9",
   "files": [
     {
-      "path": "assets/IntervalEnergy-Bl-sL-1B.js",
-      "sha256": "967e62bd0a9687a0a8470744536a6d69e99ff3c1d84509483232fb2b5b437a17"
+      "path": "assets/IntervalEnergy-BWfcNZ3e.js",
+      "sha256": "2136cb59f42338d9876328d1cd76f0c41b96870c57b9c45e44bdd81fff7e675b"
     },
     {
       "path": "assets/IntervalEnergy-DZnd1PxA.css",
@@ -15,8 +15,8 @@
       "sha256": "da8d36a6d5f19db14033cc91657ff5edcd96c748c4383a6e2167d8cb641b456c"
     },
     {
-      "path": "assets/TariffEditor-fHwrSD9x.js",
-      "sha256": "1e80e946840475a4bd91b68fbdeef62556fbd2828cf8f5f3431df7f7282d70bf"
+      "path": "assets/TariffEditor-DgsLO45r.js",
+      "sha256": "0834a0ffa32c0c20efccdfa1dab4146bcfc744d2e39bd6ce141f28aa9132b43d"
     },
     {
       "path": "assets/af-DK_CjRn6-CZxsvT2y.js",
@@ -75,8 +75,8 @@
       "sha256": "8723ffccafbd8900281c392f23c5f694490f73f1f3e5b22b62753a86115d464a"
     },
     {
-      "path": "assets/echarts-vendor-CsYpU_uy.js",
-      "sha256": "6c1220eefff56fabee7dd5133274e14be3cd97d7f6a42e85526c9baf539e0306"
+      "path": "assets/echarts-vendor-CqS4mbzr.js",
+      "sha256": "f65e648048610e3ee650c86c6c80eef1a58ae7e503a8f9fda128c5402169d2ef"
     },
     {
       "path": "assets/el-monoton-D3aKqTz2-CuqNQIvE.js",
@@ -159,12 +159,12 @@
       "sha256": "6d9e56f7dc42978594aaaa4a53482112afd08d83f5a3ee787ee730054a660668"
     },
     {
-      "path": "assets/index-9UfroIaw.css",
-      "sha256": "b2ecc17f34dfde32a1cd7786b68f45be65efdae43824231d4479c510d17bba33"
+      "path": "assets/index-CLZmPnWK.css",
+      "sha256": "5df759f5ba5c95a6a05aeec4bd4e4909aac3eb6bab74012853b2e0c4a20684a5"
     },
     {
-      "path": "assets/index-BtJYqtfo.js",
-      "sha256": "c2bd41ac02f1c113ef4852effdee25cdfd31053096f2f51b14ac8b858b2d5f0e"
+      "path": "assets/index-CP8KcguC.js",
+      "sha256": "29001cecbac9525010b31efde5ccc6156f11ae1fc6a675dd247a82b702a9c0dd"
     },
     {
       "path": "assets/is-BT8UVRze-DWEBuJpb.js",
@@ -348,7 +348,7 @@
     },
     {
       "path": "index.html",
-      "sha256": "8691a0ac2470e24fa92bca6ccae4e153cd0ffea0e56db02fb3169222fd6ad1ef"
+      "sha256": "8d6846da4e8238c6771eb55c611c1efbbd83c4c0b7a5eb5e89379f0e55edfb91"
     },
     {
       "path": "manifest.webmanifest",

@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
@@ -157,6 +157,7 @@ async def test_controller_selection_survives_native_overlay_and_clear(runtime):
 async def test_gateway_revalidates_fresh_snapshot_before_post(runtime, monkeypatch, case):
     ms, _, client = runtime
     monkeypatch.setattr(gateway, "prefer_gateway", lambda: True)
+    runtime[1].data_source = "igw"
     ms.gateway_capabilities = {"set_ess_mode": True}
     snapshot = {
         "capabilities": {"set_ess_mode": True},
@@ -183,7 +184,7 @@ async def test_gateway_revalidates_fresh_snapshot_before_post(runtime, monkeypat
     if case == "ok":
         await ws._dispatch_action("set_ess_mode", body, client)
         post.assert_awaited_once_with(
-            "set_ess_mode", body, expected_generation=gateway.source_generation()
+            "set_ess_mode", body, expected_generation=gateway.source_generation(), before_send=ANY
         )
     else:
         with pytest.raises(ValueError):
@@ -195,6 +196,7 @@ async def test_gateway_revalidates_fresh_snapshot_before_post(runtime, monkeypat
 async def test_gateway_roundtrip_cancels_slow_selection_without_post(runtime, monkeypatch):
     ms, _, client = runtime
     monkeypatch.setattr(gateway, "prefer_gateway", lambda: True)
+    runtime[1].data_source = "igw"
     ms.gateway_capabilities = {"set_ess_mode": True}
     entered = asyncio.Event()
     cancelled = asyncio.Event()
@@ -268,6 +270,8 @@ async def test_source_change_during_post_client_entry_never_posts(monkeypatch):
     post = AsyncMock()
 
     class Client:
+        """Swap the selected source while opening a transport."""
+
         async def __aenter__(self):
             gateway.set_active_source("mqtt")
             gateway.set_active_source("igw")
@@ -284,3 +288,52 @@ async def test_source_change_during_post_client_entry_never_posts(monkeypatch):
             "set_ess_mode", {"mode": "off", "request_id": "id"}, expected_generation=generation
         )
     post.assert_not_awaited()
+
+
+async def test_ess_rechecks_dry_run_after_post_client_entry(runtime, monkeypatch):
+    ms, app, client = runtime
+    app.data_source = "igw"
+    monkeypatch.setattr(gateway, "prefer_gateway", lambda: True)
+    monkeypatch.setattr(gateway.config, "GATEWAY_URL", "https://gateway.example")
+    monkeypatch.setattr(gateway, "build_headers", dict)
+    ms.gateway_capabilities = {"set_ess_mode": True}
+    monkeypatch.setattr(
+        gateway,
+        "fetch_snapshot",
+        AsyncMock(
+            return_value={
+                "capabilities": {"set_ess_mode": True},
+                "inverter": {"ess_mode": STATUS, "dry_run": False},
+            }
+        ),
+    )
+    fake = AsyncMock()
+    entries = [0]
+
+    async def enter():
+        entries[0] += 1
+        if entries[0] == 2:
+            ms._merge_daemon_state({"dry_run": True})
+        return fake
+
+    fake.__aenter__.side_effect = enter
+    monkeypatch.setattr(gateway, "_new_gateway_client", lambda: fake)
+    with pytest.raises(ValueError):
+        await ws._dispatch_action("set_ess_mode", {"mode": "off", "request_id": "id"}, client)
+    fake.post.assert_not_awaited()
+
+
+async def test_completed_child_retired_before_continuation_cannot_report_acceptance(runtime):
+    retired_done = []
+
+    def retire():
+        retired_done.extend(task.done() for task in gateway._ess_command_tasks)
+        gateway.invalidate_ess_commands()
+
+    async def operation():
+        asyncio.get_running_loop().call_soon(retire)
+
+    with pytest.raises(ValueError, match="changed"):
+        await gateway.run_ess_selection(gateway.source_generation(), operation)
+    assert retired_done == [True]
+    assert not gateway._ess_command_tasks

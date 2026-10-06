@@ -68,6 +68,18 @@ async def test_controller_and_native_ev_survive_either_arrival_order(
         )
     monkeypatch.setattr(ha_client, "is_direct_mode", lambda: False)
     monkeypatch.setitem(ws._state, "mqtt_state", state)
+    gateway.set_active_source(transport)
+    monkeypatch.setitem(
+        ws._state,
+        "app_state",
+        SimpleNamespace(
+            mqtt_state=state,
+            mqtt_client=SimpleNamespace(publish=AsyncMock()),
+            data_source=transport,
+            mqtt_connected=transport == "mqtt",
+            gateway_connected=transport == "igw",
+        ),
+    )
     payload = ws.build_payload()
     assert payload["booleans"] == {"only_charging": True, "no_feed": False}
     assert payload["controller_controls_available"] is True
@@ -247,6 +259,11 @@ async def test_retained_clear_invalidates_controller(state, payload):
 
 async def test_gateway_only_controls_use_whitelist_without_mqtt_or_ha(state, monkeypatch):
     gateway.set_active_source("igw")
+    state._merge_daemon_state({"dry_run": False})
+    monkeypatch.setitem(ws._state, "mqtt_state", state)
+    monkeypatch.setitem(
+        ws._state, "app_state", SimpleNamespace(data_source="igw", gateway_connected=True)
+    )
     post = AsyncMock()
     monkeypatch.setattr(gateway, "post_command", post)
     await ws._dispatch_action(
@@ -270,6 +287,11 @@ async def test_gateway_only_controls_use_whitelist_without_mqtt_or_ha(state, mon
 
 async def test_gateway_failure_is_reported_without_retry(state, monkeypatch):
     gateway.set_active_source("igw")
+    state._merge_daemon_state({"dry_run": False})
+    monkeypatch.setitem(ws._state, "mqtt_state", state)
+    monkeypatch.setitem(
+        ws._state, "app_state", SimpleNamespace(data_source="igw", gateway_connected=True)
+    )
     post = AsyncMock(side_effect=RuntimeError("controller unavailable"))
     monkeypatch.setattr(gateway, "post_command", post)
     with pytest.raises(RuntimeError, match="controller unavailable"):

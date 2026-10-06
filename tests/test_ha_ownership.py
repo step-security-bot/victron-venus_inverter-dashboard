@@ -87,7 +87,7 @@ def test_cerbo_and_controller_survive_ha_overlay(configured_ha, monkeypatch, con
     assert merged["booleans"] == {
         "only_charging": True,
         "no_feed": False,
-        "holiday": False,
+        "holiday": False if connected else None,
         "home_light": True if connected else None,
     }
     assert "legacy_alias" not in merged["booleans"]
@@ -126,4 +126,4 @@ async def test_poll_skips_old_cerbo_mirrors_but_keeps_appliances(configured_ha, 
 
 def test_ha_outage_does_not_create_unknown_controller_flags(configured_ha, monkeypatch):
     monkeypatch.setattr(ha_client, "_overlay", {"ha_direct_connected": False})
-    assert ha_client.merge_overlay({})["booleans"] == {"holiday": False, "home_light": None}
+    assert ha_client.merge_overlay({})["booleans"] == {"holiday": None, "home_light": None}

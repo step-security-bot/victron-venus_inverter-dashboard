@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from inverter_dashboard import config
+from inverter_dashboard import config, server
 from inverter_dashboard.server import MqttState, _keepalive_loop, _subscribe_topics
 
 
@@ -110,8 +110,11 @@ def test_grid_meter_fallback_and_disconnected_vebus(ms):
     sample(ms, "system", "Ac/Grid/L1/Power", 0)
     assert ms.current_state["gt"] == 0
     sample(ms, "system", "Ac/Grid/L1/Power", None)
-    assert ms.current_state["gt"] == 20
+    assert ms.current_state["gt"] is None  # current systemcalc invalidation is authoritative
     ms._handle_cerbo_device("N/site/grid/30", b"")
+    assert ms.current_state["gt"] is None
+    ms._handle_cerbo_device("N/site/system/0", b"")
+    sample(ms, "system", "Ac/ActiveIn/Source", 1)
     assert ms.current_state["gt"] == 900
     sample(ms, "vebus", "Ac/ActiveIn/Connected", 0, "276")
     assert ms.current_state["gt"] is None
@@ -313,10 +316,13 @@ async def test_regular_keepalive_suppresses_full_republish(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", sleep)
     with pytest.raises(asyncio.CancelledError):
         await _keepalive_loop(broker, lambda: "site")
-    assert sleeps == [45, 45]
+    assert sleeps == [20, 20]
+    assert 0 < server.KEEPALIVE_INTERVAL_SECS < 30
     assert broker.events == [
-        ("publish", "R/site/keepalive", '{"keepalive-options":["suppress-republish"]}')
+        ("publish", "R/site/keepalive", '{"keepalive-options":["suppress-republish"]}'),
+        *[("publish", topic, "") for topic in server._water_read_topics("site")],
     ]
+    assert all(event[1].startswith("R/site/") for event in broker.events)
 
 
 @pytest.mark.asyncio
@@ -405,3 +411,42 @@ async def test_empty_leaf_removes_entire_service_without_reviving_legacy(ms):
     assert ms.current_state["batteries"] == []
     assert ms.current_state["battery_voltage"] is None
     assert ms.current_state["battery_soc"] is None
+
+
+@pytest.mark.parametrize("portal", ["", "site/other", "+", "#", "a b", "site\x00"])
+def test_water_read_topics_reject_invalid_portal(portal):
+    assert server._water_read_topics(portal) == []
+
+
+def test_water_read_topics_only_configured_deduplicated_targets(monkeypatch):
+    monkeypatch.setattr(config, "WATER_PUMP_INSTANCE", 7)
+    monkeypatch.setattr(config, "WATER_VALVE_INSTANCE", 7)
+    assert server._water_read_topics("site") == ["R/site/pump/7/Mode"]
+    monkeypatch.setattr(config, "WATER_VALVE_INSTANCE", -1)
+    assert server._water_read_topics("site") == ["R/site/pump/7/Mode"]
+    monkeypatch.setattr(config, "WATER_PUMP_INSTANCE", True)
+    assert server._water_read_topics("site") == []
+
+
+async def test_source_retirement_after_keepalive_prevents_water_reads(monkeypatch):
+    portal = ["site"]
+    broker = Broker()
+    original = broker.publish
+
+    async def publish(topic, payload, **kwargs):
+        await original(topic, payload, **kwargs)
+        portal[0] = ""
+
+    broker.publish = publish
+    count = [0]
+
+    async def sleep(_):
+        count[0] += 1
+        if count[0] == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await _keepalive_loop(broker, lambda: portal[0])
+    assert len(broker.events) == 1
+    assert broker.events[0][1] == "R/site/keepalive"

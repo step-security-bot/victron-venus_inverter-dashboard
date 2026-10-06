@@ -11,6 +11,7 @@ local_config.py); GET /api/settings masks them.
 import json
 import logging
 import os
+import tempfile
 from typing import Any
 
 from . import config
@@ -21,6 +22,13 @@ logger = logging.getLogger(__name__)
 # Keys the dashboard may read/write; everything else is rejected.
 ALLOWED_KEYS = {
     "camera_topic": str,
+    "show_daily_stats": bool,
+    "show_header_toggles": bool,
+    "show_ha_sensors": bool,
+    "show_ha_numbers": bool,
+    "show_batteries": bool,
+    "show_solar_production": bool,
+    "show_active_loads": bool,
     "show_ev": bool,
     "show_washer": bool,
     "show_dryer": bool,
@@ -44,6 +52,13 @@ SECRET_KEYS = ("mqtt_password", "ha_token")
 
 DEFAULTS: dict[str, Any] = {
     "camera_topic": CAMERA_TOPIC,
+    "show_daily_stats": True,
+    "show_header_toggles": True,
+    "show_ha_sensors": True,
+    "show_ha_numbers": True,
+    "show_batteries": True,
+    "show_solar_production": True,
+    "show_active_loads": True,
     "show_ev": True,
     "show_washer": True,
     "show_dryer": True,
@@ -72,6 +87,9 @@ _CONFIG_ATTRS = {
 
 def settings_path() -> str:
     """dashboard_settings.json lives where local_config.py is looked up."""
+    override = os.environ.get("INVERTER_DASHBOARD_SETTINGS_FILE", "").strip()
+    if override:
+        return os.path.abspath(override)
     env_dir = os.environ.get("INVERTER_DASHBOARD_CONFIG", "").strip()
     if env_dir:
         return os.path.join(env_dir, "dashboard_settings.json")
@@ -90,7 +108,7 @@ def load_settings(mask_secrets: bool = False) -> dict[str, Any]:
             stored = json.load(f)
         if isinstance(stored, dict):
             for k, typ in ALLOWED_KEYS.items():
-                if k in stored and isinstance(stored[k], typ):
+                if k in stored and _valid_setting(k, stored[k], typ):
                     out[k] = stored[k]
     except (OSError, json.JSONDecodeError):
         pass
@@ -123,6 +141,43 @@ def apply_connection_overrides() -> int:
     return applied
 
 
+def _valid_setting(key: str, value: Any, expected_type: type) -> bool:
+    if not isinstance(value, expected_type):
+        return False
+    if key == "mqtt_port":
+        return not isinstance(value, bool) and 1 <= value <= 65535
+    return not (key in SECRET_KEYS and value == "***")
+
+
+def _sync_settings_directory(parent: str) -> None:
+    """Persist the rename on POSIX; Windows does not expose directory fsync."""
+    if os.name != "posix":
+        return
+    directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _write_private_settings(merged: dict[str, Any]) -> None:
+    path = settings_path()
+    parent = os.path.dirname(path)
+    if os.environ.get("INVERTER_DASHBOARD_SETTINGS_FILE", "").strip():
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".dashboard-settings-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(merged, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _sync_settings_directory(parent)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def save_settings(patch: dict[str, Any]) -> dict[str, Any]:
     """Validate patch against ALLOWED_KEYS, merge-write, return new settings.
 
@@ -132,16 +187,15 @@ def save_settings(patch: dict[str, Any]) -> dict[str, Any]:
     for k, v in patch.items():
         if k not in ALLOWED_KEYS:
             raise ValueError(f"unknown setting: {k}")
-        if not isinstance(v, ALLOWED_KEYS[k]):
+        if k in SECRET_KEYS and v == "***":
+            continue  # Round-tripping the masked API value preserves the secret.
+        if not _valid_setting(k, v, ALLOWED_KEYS[k]):
             # API contract: bad type is a 400 (ValueError), not a TypeError
-            raise ValueError(f"setting {k} must be {ALLOWED_KEYS[k].__name__}")  # noqa: TRY004
+            raise ValueError(f"setting {k} must be {ALLOWED_KEYS[k].__name__}")
         clean[k] = v
 
     merged = load_settings()
     merged.update(clean)
-    tmp = settings_path() + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2)
-    os.replace(tmp, settings_path())
+    _write_private_settings(merged)
     logger.info("Saved settings: %s", sorted(clean))
     return merged

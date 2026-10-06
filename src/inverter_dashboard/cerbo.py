@@ -27,7 +27,7 @@ CERBO_KINDS = (
     "evcharger",
     "settings",
 )
-KEEPALIVE_INTERVAL_SECS = 45
+KEEPALIVE_INTERVAL_SECS = 20
 NATIVE_FRESHNESS_SECS = 120
 NATIVE_EV_KEYS = frozenset(
     {
@@ -65,6 +65,9 @@ CERBO_OWNED_KEYS = frozenset(
         "t3",
         "tt",
         "grid_available",
+        "grid_l1_available",
+        "grid_l2_available",
+        "grid_l3_available",
         "bv",
         "bc",
         "bp",
@@ -227,6 +230,7 @@ class CerboOverlayMixin:
         self._cerbo_overlay: dict[str, Any] = {}
         self._native_observations: dict[str, tuple[float, float]] = {}
         self._native_last_emit: float | None = None
+        self._water_mode_observations: dict[str, float] = {}
         self._native_invalidated: set[str] = set()
 
     def _note_native_observation(self, source: str) -> None:
@@ -256,6 +260,7 @@ class CerboOverlayMixin:
     def clear_cerbo_state(self) -> None:
         """Invalidate observations after disconnect; await a fresh full publish."""
         self._cerbo_devices.clear()
+        self._water_mode_observations.clear()
         self._native_invalidated.update(self._native_observations)
         self._apply_cerbo_overlays()
 
@@ -281,6 +286,11 @@ class CerboOverlayMixin:
                 if value is None:
                     self._claim_invalid_leaf(kind, instance, path)
         self._cerbo_devices = devices
+        self._water_mode_observations = {
+            instance: time.monotonic()
+            for instance, leaves in self._devices("pump")
+            if number(leaves.get("Mode")) in (0, 1, 2)
+        }
         self._note_native_observation("igw")
         self._apply_cerbo_overlays()
 
@@ -302,7 +312,7 @@ class CerboOverlayMixin:
             "AutoSelectedBatteryService",
         )
 
-    def _handle_cerbo_device(self, topic: str, payload: bytes) -> bool:  # pylint: disable=too-many-return-statements
+    def _handle_cerbo_device(self, topic: str, payload: bytes, *, retained: bool = False) -> bool:  # pylint: disable=too-many-return-statements
         parts = topic.split("/")
         if len(parts) < 4 or parts[0] != "N" or not parts[1] or not parts[3]:
             return False
@@ -312,6 +322,10 @@ class CerboOverlayMixin:
         if kind not in CERBO_KINDS:
             return False
         path = "/".join(parts[4:])
+        if kind == "pump" and path == "Mode":
+            # Any current-source report supersedes the old command authority;
+            # only a valid nonretained Mode below can establish it again.
+            self._water_mode_observations.pop(instance, None)
         if not payload:
             devices = self._cerbo_devices.get(kind, {})
             if instance not in devices:
@@ -320,6 +334,8 @@ class CerboOverlayMixin:
             # the service disappears. Remove it immediately on the first such
             # notification; JSON {"value": null} invalidates only one leaf.
             devices.pop(instance)
+            if kind == "pump":
+                self._water_mode_observations.pop(instance, None)
         else:
             if not path:
                 return False
@@ -335,6 +351,7 @@ class CerboOverlayMixin:
             if not self._known_path(kind, path):
                 return False
             self._cerbo_devices.setdefault(kind, {}).setdefault(instance, {})[path] = value
+            self._observe_water_mode(kind, instance, path, value, retained)
             if value is None:
                 self._claim_invalid_leaf(kind, instance, path)
         before = dict(self.current_state)
@@ -348,6 +365,21 @@ class CerboOverlayMixin:
             self._native_last_emit = now
             return True
         return False
+
+    def _observe_water_mode(self, kind, instance, path, value, retained) -> None:
+        if kind != "pump":
+            return
+        if path == "Connected" and number(value) != 1:
+            self._water_mode_observations.pop(instance, None)
+        if path == "Mode":
+            self._water_mode_observations.pop(instance, None)
+            if not retained and number(value) in (0, 1, 2):
+                self._water_mode_observations[instance] = time.monotonic()
+
+    def water_mode_fresh(self, instance: str) -> bool:
+        """Only an accepted Mode observation from this source permits a write."""
+        observed = self._water_mode_observations.get(instance)
+        return observed is not None and 0 <= time.monotonic() - observed <= 30
 
     def _claim_invalid_leaf(self, kind: str, instance: str, path: str) -> None:
         """An explicit unknown is authoritative even before the first sample."""
@@ -508,13 +540,18 @@ class CerboOverlayMixin:
             and number(system.get("Ac/ActiveIn/Source")) in (1, 3)
         )
         for i in (1, 2, 3):
-            value = _first_number(
-                system.get(f"Ac/Grid/L{i}/Power"),
-                grid.get(f"Ac/L{i}/Power"),
-                vebus.get(f"Ac/ActiveIn/L{i}/P") if use_input else None,
-                vebus.get(f"Ac/ActiveIn/L{i}/Power") if use_input else None,
+            path = f"Ac/Grid/L{i}/Power"
+            value = (
+                number(system[path])
+                if path in system
+                else _first_number(
+                    grid.get(f"Ac/L{i}/Power"),
+                    vebus.get(f"Ac/ActiveIn/L{i}/P") if use_input else None,
+                    vebus.get(f"Ac/ActiveIn/L{i}/Power") if use_input else None,
+                )
             )
-            if value is not None:
+            if path in system or value is not None:
+                out[f"grid_l{i}_available"] = value is not None
                 out[f"g{i}"] = value
             consumption = _sum_known(
                 [
@@ -530,11 +567,13 @@ class CerboOverlayMixin:
                 out[f"t{i}"] = value
         total = _sum_known(out.get(f"g{i}") for i in (1, 2, 3))
         # A meter aggregate is useful when no phase powers were published.
-        if total is None:
+        if total is None and not any(f"Ac/Grid/L{i}/Power" in system for i in (1, 2, 3)):
             total = _power(grid)
         if total is not None:
             out["gt"] = total
             out["grid_available"] = True
+        elif any(f"Ac/Grid/L{i}/Power" in system for i in (1, 2, 3)):
+            out["grid_available"] = False
         elif connected is not None:
             out["grid_available"] = bool(connected)
         total = _sum_known(out.get(f"t{i}") for i in (1, 2, 3))

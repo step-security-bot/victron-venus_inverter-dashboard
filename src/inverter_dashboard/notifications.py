@@ -46,12 +46,10 @@ def _as_bool(v: Any) -> bool | None:
 def _as_i64(v: Any) -> int | None:
     if isinstance(v, bool):
         return int(v)
-    if isinstance(v, (int, float)):
-        return int(v)
-    if isinstance(v, str):
+    if isinstance(v, (int, float, str)):
         try:
-            return int(float(v.strip()))
-        except ValueError:
+            return int(float(v.strip())) if isinstance(v, str) else int(v)
+        except (ValueError, OverflowError):
             return None
     return None
 

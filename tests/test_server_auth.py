@@ -221,7 +221,7 @@ def test_api_state_authenticated_includes_live_tiles(monkeypatch, secret, creden
     monkeypatch.setattr(
         server.websocket_handler,
         "build_payload",
-        lambda: {"setpoint": 42, "ess_mode": "KeepBatteriesCharged"},
+        lambda: {"setpoint": 42, "ess_mode": "KeepBatteriesCharged", "grid_l2_available": False},
     )
     client = TestClient(server.app)
     response = client.get("/api/state", **credentials)
@@ -231,3 +231,4 @@ def test_api_state_authenticated_includes_live_tiles(monkeypatch, secret, creden
     assert data["ok"] is True
     assert data["setpoint"] == 42
     assert data["ess_mode"] == "KeepBatteriesCharged"
+    assert data["grid_l2_available"] is False

@@ -1,9 +1,11 @@
 """Native Loads, bank SoC and water controls across MQTT and IGW."""
 
+import asyncio
 import copy
 import json
+import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
@@ -11,6 +13,8 @@ from inverter_dashboard import config, gateway, ha_client
 from inverter_dashboard import websocket_handler as ws
 from inverter_dashboard.cerbo import voltage_soc
 from inverter_dashboard.server import MqttState
+
+REAL_POST_COMMAND = gateway.post_command
 
 
 @pytest.fixture
@@ -173,6 +177,18 @@ def igw_water(state, monkeypatch):
         gateway_connected=True,
     )
     monkeypatch.setitem(ws._state, "app_state", app)
+
+    def fresh_snapshot(_client):
+        return {
+            "capabilities": state.gateway_capabilities,
+            "pump": {
+                f"{instance}/{path}": value
+                for instance, leaves in state._cerbo_devices.get("pump", {}).items()
+                for path, value in leaves.items()
+            },
+        }
+
+    monkeypatch.setattr(gateway, "fetch_snapshot", AsyncMock(side_effect=fresh_snapshot))
     post = AsyncMock()
     monkeypatch.setattr(gateway, "post_command", post)
     return app, post
@@ -194,7 +210,12 @@ async def test_gateway_water_writes_exact_native_target_without_controller(
     assert payload["water_pump_controls_available"] is True
     assert payload["water_valve_controls_available"] is True
     await ws._dispatch_action("water_mode", {"which": which, "mode": mode}, None)
-    post.assert_awaited_once_with("water_mode", {"instance": instance, "mode": mode})
+    post.assert_awaited_once_with(
+        "water_mode",
+        {"instance": instance, "mode": mode},
+        expected_generation=gateway.source_generation(),
+        before_send=ANY,
+    )
     assert app.mqtt_state.current_state == before
 
 
@@ -257,7 +278,12 @@ async def test_gateway_water_instance_zero_is_not_replaced_by_default(igw_water,
     )
     assert ws.build_payload()["water_pump_controls_available"] is True
     await ws._dispatch_action("water_mode", {"which": "pump", "mode": 0}, None)
-    post.assert_awaited_once_with("water_mode", {"instance": 0, "mode": 0})
+    post.assert_awaited_once_with(
+        "water_mode",
+        {"instance": 0, "mode": 0},
+        expected_generation=gateway.source_generation(),
+        before_send=ANY,
+    )
 
 
 async def test_multiple_shunts_choose_first_valid_voltage(state):
@@ -400,3 +426,117 @@ async def test_reconnect_does_not_restore_pre_disconnect_freshness(state, transp
     assert after["observed_at"] == before["observed_at"]
     await deliver(state, {"acload": {"81/Ac/Power": 0}}, transport)
     assert state.native_telemetry(transport, True)["quality"] == "live"
+
+
+@pytest.mark.parametrize("case", ["retained", "expired", "future", "malformed", "retired"])
+async def test_water_commands_require_current_nonretained_mode(state, case):
+    client = SimpleNamespace(publish=AsyncMock())
+    app = SimpleNamespace(
+        mqtt_state=state,
+        mqtt_client=client,
+        data_source="mqtt",
+        mqtt_connected=True,
+        gateway_connected=False,
+    )
+    ws._state["app_state"] = app
+    await state.on_message("N/site/pump/7/Mode", b'{"value":0}', retained=case == "retained")
+    if case == "expired":
+        state._water_mode_observations["7"] = time.monotonic() - 31
+    elif case == "future":
+        state._water_mode_observations["7"] = time.monotonic() + 1
+    elif case == "malformed":
+        await state.on_message("N/site/pump/7/Mode", b'{"value":"1"}')
+    elif case == "retired":
+        state.clear_cerbo_state()
+    assert not ws.build_payload()["water_pump_controls_available"]
+    with pytest.raises(RuntimeError):
+        await ws._dispatch_action("water_mode", {"which": "pump", "mode": 1}, client)
+    client.publish.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"{",
+        b"[]",
+        b"{}",
+        b'{"value":"1"}',
+        b'{"value":true}',
+        b'{"value":null}',
+        b'{"value":0.5}',
+        b'{"value":3}',
+        b'{"value":NaN}',
+        b'{"value":Infinity}',
+    ],
+)
+async def test_invalid_current_water_mode_revokes_until_valid_observation(state, payload):
+    await state.on_message("N/site/pump/7/Mode", b'{"value":0}')
+    assert state.water_mode_fresh("7")
+    # A foreign source cannot revoke this source's authority.
+    await state.on_message("N/other-site/pump/7/Mode", payload)
+    assert state.water_mode_fresh("7")
+    await state.on_message("N/site/pump/9/Mode", payload)
+    assert state.water_mode_fresh("7")
+    await state.on_message("N/site/pump/7/State", payload)
+    assert state.water_mode_fresh("7")
+    await state.on_message("N/site/pump/7/Mode", payload)
+    assert not state.water_mode_fresh("7")
+    await state.on_message("N/site/pump/7/Mode", b'{"value":1}', retained=True)
+    assert not state.water_mode_fresh("7")
+    await state.on_message("N/site/pump/7/Mode", b'{"value":1}')
+    assert state.water_mode_fresh("7")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "source_roundtrip",
+        "device_disconnected",
+        "mode_removed",
+        "capability_withdrawn",
+        "client_entry_offline",
+    ],
+)
+async def test_water_gateway_revalidates_current_context_before_post(igw_water, monkeypatch, case):
+    app, post = igw_water
+    snapshot = {"capabilities": {"water_mode": True}, "pump": {"7/Mode": 0}}
+
+    async def fresh(_client):
+        if case == "source_roundtrip":
+            gateway.set_active_source("mqtt")
+            gateway.set_active_source("igw")
+            await asyncio.sleep(0)
+        elif case == "device_disconnected":
+            snapshot["pump"]["7/Connected"] = 0
+        elif case == "mode_removed":
+            snapshot["pump"].clear()
+        elif case == "capability_withdrawn":
+            snapshot["capabilities"].clear()
+        return snapshot
+
+    monkeypatch.setattr(gateway, "fetch_snapshot", fresh)
+    if case == "client_entry_offline":
+        # The real POST helper checks after HTTP client entry, before its POST.
+        from inverter_dashboard import config as cfg
+
+        monkeypatch.setattr(cfg, "GATEWAY_URL", "https://gateway.example")
+        fake = AsyncMock()
+        count = [0]
+
+        async def enter():
+            count[0] += 1
+            if count[0] == 2:
+                app.gateway_connected = False
+            return fake
+
+        fake.__aenter__.side_effect = enter
+        monkeypatch.setattr(gateway, "_new_gateway_client", lambda: fake)
+        # Retrieve implementation rather than the fixture's dispatch mock.
+        monkeypatch.setattr(gateway, "post_command", REAL_POST_COMMAND)
+        with pytest.raises(RuntimeError):
+            await ws._dispatch_action("water_mode", {"which": "pump", "mode": 1}, None)
+        fake.post.assert_not_awaited()
+    else:
+        with pytest.raises((RuntimeError, ValueError, asyncio.CancelledError)):
+            await ws._dispatch_action("water_mode", {"which": "pump", "mode": 1}, None)
+        post.assert_not_awaited()

@@ -17,11 +17,13 @@ import logging
 import math
 import os
 import sys
+import time
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
+from . import controller_commands
 from .cerbo import CERBO_OWNED_KEYS
 from .config import HA_POLL_TIMEOUT, HA_REQUEST_TIMEOUT
 
@@ -32,6 +34,8 @@ _url = ""
 _token = ""
 _direct = False
 _poll_interval = 12.0
+_overlay_observed_at: float | None = None
+_overlay_observed_monotonic: float | None = None
 
 _boolean_entities: dict[str, str] = {}
 _switch_entities: dict[str, str] = {}
@@ -65,6 +69,7 @@ CONTROL_FLAG_KEYS = frozenset(
 )
 _MQTT_OWNED_KEYS = (
     CERBO_OWNED_KEYS
+    | controller_commands.SERVER_FIELDS
     | CONTROL_FLAG_KEYS
     | frozenset(
         {
@@ -74,6 +79,9 @@ _MQTT_OWNED_KEYS = (
             "ess_mode_observed_at",
             "ess_mode_controls_available",
             "dry_run",
+            "setpoint_override",
+            "grid_backup",
+            "grid_using_backup",
             "daily_stats",
             "solar_forecast",
             "limits",
@@ -358,8 +366,25 @@ def is_toggle_allowed(entity_id: str) -> bool:
 
 def replace_overlay(data: dict[str, Any]) -> None:
     """Replace HA overlay (used after successful poll or toggle refresh)."""
-    global _overlay
+    global _overlay, _overlay_observed_at, _overlay_observed_monotonic
     _overlay = data
+    connected = data.get("ha_direct_connected") is True
+    _overlay_observed_at = time.time() if connected else None
+    _overlay_observed_monotonic = time.monotonic() if connected else None
+
+
+def controls_available() -> bool:
+    return (
+        is_direct_mode()
+        and _overlay.get("ha_direct_connected") is True
+        and _overlay_observed_monotonic is not None
+        and 0 <= time.monotonic() - _overlay_observed_monotonic <= 30
+    )
+
+
+def require_live_controls() -> None:
+    if not controls_available():
+        raise ValueError("Wait for fresh direct Home Assistant telemetry")
 
 
 def _ha_headers() -> dict:
@@ -388,6 +413,8 @@ async def _ha_request(
     if not _configured:
         return None
     client = _get_http_client()
+    if method == "POST":
+        require_live_controls()
     try:
         async with asyncio.timeout(HA_REQUEST_TIMEOUT):
             resp = await client.request(
@@ -512,11 +539,11 @@ def build_filtered_displays(docs: dict[str, dict | None], cfg: dict[str, Any]) -
                 out["numbers"].append(disp)
     for eid in cfg.get("covers") or []:
         doc = docs.get(eid)
-        if doc:
+        if doc and doc.get("state") not in (None, "unknown", "unavailable"):
             out["covers"].append(_cover_display(doc))
     for eid in cfg.get("media_players") or []:
         doc = docs.get(eid)
-        if doc:
+        if doc and doc.get("state") not in (None, "unknown", "unavailable"):
             out["media_players"].append(
                 {
                     "entity_id": doc["entity_id"],
@@ -526,7 +553,7 @@ def build_filtered_displays(docs: dict[str, dict | None], cfg: dict[str, Any]) -
             )
     for eid in cfg.get("scenes") or []:
         doc = docs.get(eid)
-        if doc:
+        if doc and doc.get("state") != "unavailable":
             out["scenes"].append({"entity_id": doc["entity_id"], "name": _friendly_name(doc)})
     weather_eid = cfg.get("weather")
     wdoc = docs.get(weather_eid) if weather_eid else None
@@ -563,7 +590,7 @@ async def fetch_states_once() -> dict[str, Any]:
             booleans = {}
             for key, eid in _ha_fields(_boolean_entities):
                 st = await _get_state(client, headers, eid)
-                booleans[key] = st == "on"
+                booleans[key] = _home_switch_state(st)
             out["booleans"] = booleans
 
             for key, eid in _ha_fields(_switch_entities):
@@ -601,7 +628,7 @@ def _apply_connected_overlay(merged: dict[str, Any], o: dict[str, Any]) -> None:
     booleans = dict(merged.get("booleans") or {})
     overlay_booleans = o.get("booleans") or {}
     for k, _ in _ha_fields(_boolean_entities):
-        booleans[k] = bool(overlay_booleans.get(k))
+        booleans[k] = overlay_booleans.get(k) if isinstance(overlay_booleans.get(k), bool) else None
     merged["booleans"] = booleans
     for k, _ in _ha_fields(_switch_entities):
         merged[k] = bool(o.get(k))
@@ -621,7 +648,7 @@ def _apply_disconnected_overlay(merged: dict[str, Any]) -> None:
     """Fill merged dashboard state with safe defaults when HA is unreachable."""
     booleans = dict(merged.get("booleans") or {})
     for k, _ in _ha_fields(_boolean_entities):
-        booleans[k] = False
+        booleans[k] = None
     merged["booleans"] = booleans
     for k, _ in _ha_fields(_switch_entities):
         merged[k] = False
@@ -666,6 +693,7 @@ async def ha_poll_loop():
 
 async def call_turn(entity_id: str, turn_on: bool) -> bool:
     """Explicit turn_on / turn_off."""
+    require_live_controls()
     if not _configured:
         return False
 
@@ -682,6 +710,7 @@ async def call_turn(entity_id: str, turn_on: bool) -> bool:
 
 async def toggle_entity(entity_id: str) -> bool:
     """HA toggle service (no prior state required)."""
+    require_live_controls()
     if not _configured:
         return False
 
@@ -707,6 +736,7 @@ def domain_for_press(entity_id: str) -> str | None:
 
 async def press_entity(entity_id: str) -> bool:
     """Fire button.press."""
+    require_live_controls()
     resp = await _ha_request(
         "POST", "/api/services/button/press", json_body={"entity_id": entity_id}
     )
@@ -717,6 +747,7 @@ async def perform_action(action: str, entity: str, payload: dict[str, Any]) -> b
     """Dispatch configured rich HA controls through the direct HA connection."""
     if not is_direct_mode():
         raise ValueError("Direct Home Assistant controls are not enabled")
+    require_live_controls()
     if not isinstance(entity, str) or not entity or entity.rsplit(".", 1)[-1] in CONTROL_FLAG_KEYS:
         raise ValueError("A Home Assistant entity is required")
     domain = entity.split(".", 1)[0]
@@ -761,5 +792,25 @@ async def perform_action(action: str, entity: str, payload: dict[str, Any]) -> b
         service = "turn_on"
     if not allowed or not service:
         raise ValueError("Home Assistant action is not allowed for this entity")
+    section = {
+        "number_set": "numbers",
+        "set_cover_position": "covers",
+        "media_player": "media_players",
+        "scene_activate": "scenes",
+    }[action]
+    displays = (_overlay.get("ha_filtered") or {}).get(section) or []
+    observed = next((item for item in displays if item.get("entity_id") == entity), None)
+    if observed is None:
+        raise ValueError("Home Assistant entity is currently unavailable")
+    if action == "number_set":
+        minimum, maximum = observed.get("min"), observed.get("max")
+        if (
+            any(
+                type(bound) not in (int, float) or not math.isfinite(bound)
+                for bound in (minimum, maximum)
+            )
+            or not minimum <= body["value"] <= maximum
+        ):
+            raise ValueError("Number value is outside the current entity range")
     response = await _ha_request("POST", f"/api/services/{domain}/{service}", json_body=body)
     return response is not None and response.status_code == 200

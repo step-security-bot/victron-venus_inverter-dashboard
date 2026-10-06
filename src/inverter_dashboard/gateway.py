@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 import httpx
 
-from . import config, notifications
+from . import config, controller_commands, notifications
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,8 @@ async def run_ess_selection(generation: int, operation: Callable[[], Awaitable[N
     _ess_command_tasks.add(task)
     try:
         result = (await asyncio.gather(task, return_exceptions=True))[0]
-        if isinstance(result, asyncio.CancelledError) and generation != _source_generation:
-            raise ValueError("Connection changed during ESS selection") from None
+        if generation != _source_generation:
+            raise ValueError("Connection changed during command dispatch") from None
         if isinstance(result, BaseException):
             raise result
     finally:
@@ -165,6 +165,9 @@ def apply_snapshot(ms: Any, snap: dict[str, Any]) -> None:
             ms._merge_daemon_state(snap["inverter"])
         elif snap["inverter"] is None:
             ms.clear_daemon_state()
+    if ms.gateway_capabilities.get("setpoint_override") is not True:
+        ms.current_state["setpoint_override"] = None
+        ms._setpoint_override_observed_at = None
     ms.replace_cerbo_snapshot(snap)
 
     # Alert banners (desktop parity): Venus-platform GUIv2 slots from IGW
@@ -224,7 +227,11 @@ async def fetch_snapshot(client: httpx.AsyncClient) -> dict[str, Any]:
 
 
 async def post_command(
-    name: str, body: dict[str, Any] | None = None, *, expected_generation: int | None = None
+    name: str,
+    body: dict[str, Any] | None = None,
+    *,
+    expected_generation: int | None = None,
+    before_send: Callable[[], None] | None = None,
 ) -> None:
     """POST /v1/commands/{name} (whitelist only on the gateway)."""
     base = config.validate_gateway_url(config.GATEWAY_URL)
@@ -233,7 +240,18 @@ async def post_command(
     async with _new_gateway_client() as client:
         if expected_generation is not None and expected_generation != _source_generation:
             raise ValueError("Connection changed before ESS selection")
-        resp = await client.post(url, headers=headers, json=body or {}, follow_redirects=False)
+        if before_send is not None:
+            before_send()
+        if name in ("setpoint_override", "electricity_tariff"):
+            headers["Content-Type"] = "application/json"
+            resp = await client.post(
+                url,
+                headers=headers,
+                content=controller_commands.encode_body(body or {}).encode("utf-8"),
+                follow_redirects=False,
+            )
+        else:
+            resp = await client.post(url, headers=headers, json=body or {}, follow_redirects=False)
         resp.raise_for_status()
 
 

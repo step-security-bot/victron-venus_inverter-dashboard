@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import uvicorn
 from aiomqtt import Client, MqttError, TLSParameters
@@ -27,7 +28,16 @@ from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, ess_mode, gateway, ha_client, notifications, settings_store, websocket_handler
+from . import (
+    config,
+    controller_commands,
+    ess_mode,
+    gateway,
+    ha_client,
+    notifications,
+    settings_store,
+    websocket_handler,
+)
 from .cerbo import (
     CERBO_KINDS,
     CERBO_OWNED_KEYS,
@@ -105,8 +115,12 @@ class MqttState(CerboOverlayMixin):
         self.gateway_capabilities: dict[str, Any] = {}
         self._daemon_keys: set[str] = set()
         self._daemon_received_at: float | None = None
+        self._controller_command_received_at: float | None = None
         self._controller_ess_mode: dict[str, Any] | None = None
         self._ess_mode_observed_at: float | None = None
+        self._setpoint_override_observed_at: float | None = None
+        self._override_observation_sequence = 0
+        self._electricity_tariff_observed_at: float | None = None
         self._alarm_values: dict[str, int] = {}
         # Venus-platform GUIv2 notification slots (desktop parity)
         self._platform_slots: dict[tuple[str, int], dict[str, Any]] = {}
@@ -140,7 +154,13 @@ class MqttState(CerboOverlayMixin):
         to flash then disappear.
         """
         self._daemon_received_at = time.monotonic()
-        self._daemon_keys.update(incoming.keys() - NATIVE_SECTION_KEYS - ess_mode.SERVER_FIELDS)
+        self._controller_command_received_at = None if retained else time.monotonic()
+        self._daemon_keys.update(
+            incoming.keys()
+            - NATIVE_SECTION_KEYS
+            - ess_mode.SERVER_FIELDS
+            - controller_commands.SERVER_FIELDS
+        )
         if "ess_mode" in incoming:
             mode = incoming["ess_mode"]
             self._controller_ess_mode = dict(mode) if isinstance(mode, dict) else None
@@ -149,11 +169,16 @@ class MqttState(CerboOverlayMixin):
             )
         for key, value in incoming.items():
             self._merge_daemon_field(key, value)
+        controller_commands.observe(self, incoming, retained=retained)
         # Re-apply durable Cerbo maps so slim ticks cannot blank live tiles.
         self._apply_cerbo_overlays()
 
     def _merge_daemon_field(self, key: str, value: Any) -> None:
-        if key in NATIVE_SECTION_KEYS or key in ess_mode.SERVER_FIELDS:
+        if (
+            key in NATIVE_SECTION_KEYS
+            or key in ess_mode.SERVER_FIELDS
+            or key in controller_commands.SERVER_FIELDS
+        ):
             return
         if key in CERBO_OWNED_KEYS and self._cerbo_has_overlay(key):
             return
@@ -171,8 +196,14 @@ class MqttState(CerboOverlayMixin):
         for key in self._daemon_keys:
             self.current_state[key] = None
         self._daemon_received_at = None
+        self._controller_command_received_at = None
         self._controller_ess_mode = None
         self._ess_mode_observed_at = None
+        self._setpoint_override_observed_at = None
+        self._electricity_tariff_observed_at = None
+        if self.current_state:
+            self.current_state["setpoint_override"] = None
+            self.current_state["grid_backup_observed_at"] = None
         self._apply_cerbo_overlays()
 
     def controller_available(self) -> bool:
@@ -182,6 +213,15 @@ class MqttState(CerboOverlayMixin):
             self.clear_daemon_state()
             return False
         return True
+
+    def controller_commands_available(self) -> bool:
+        """Retained or expired state may display, but cannot authorize commands."""
+        observed = self._controller_command_received_at
+        return (
+            self.controller_available()
+            and observed is not None
+            and 0 <= time.monotonic() - observed <= 30
+        )
 
     def _cerbo_has_overlay(self, key: str) -> bool:
         return key in self._cerbo_claimed_keys
@@ -233,12 +273,19 @@ class MqttState(CerboOverlayMixin):
     async def _dispatch_mqtt_message(self, topic: str, payload: bytes, *, retained: bool) -> None:
         if topic == "inverter/state":
             await self._handle_daemon_message(payload, retained=retained)
+        elif topic == "inverter/setpoint_override":
+            controller_commands.observe(
+                self,
+                {"setpoint_override": json.loads(payload) if payload else None},
+                retained=retained,
+            )
+            await self._emit()
         elif topic == "inverter/portal":
             await self._discover_portal(payload.decode().strip().strip('"'))
         elif topic == "inverter/notifications":
             self.push_notification(json.loads(payload.decode()))
             await self._emit()
-        elif self._apply_native_message(topic, payload):
+        elif self._apply_native_message(topic, payload, retained=retained):
             await self._emit()
 
     async def _handle_daemon_message(self, payload: bytes, *, retained: bool) -> None:
@@ -250,7 +297,7 @@ class MqttState(CerboOverlayMixin):
             self._merge_daemon_state(data, retained=retained)
             await self._emit()
 
-    def _apply_native_message(self, topic: str, payload: bytes) -> bool:
+    def _apply_native_message(self, topic: str, payload: bytes, *, retained: bool = False) -> bool:
         if "/platform/" in topic and "/Notifications/" in topic:
             return self.handle_platform_notification(topic, payload)
         if "/Alarms/" in topic:
@@ -260,7 +307,7 @@ class MqttState(CerboOverlayMixin):
             self.handle_camera_event(payload)
             return bool(self.camera_event)
         if topic.startswith("N/"):
-            return self._handle_cerbo_device(topic, payload)
+            return self._handle_cerbo_device(topic, payload, retained=retained)
         return False
 
     def push_notification(self, data: Any) -> None:
@@ -361,6 +408,8 @@ class MqttState(CerboOverlayMixin):
             result["ess_mode"] = dict(self._controller_ess_mode)
         if result:
             result["ess_mode_observed_at"] = self._ess_mode_observed_at
+            result["setpoint_override_observed_at"] = self._setpoint_override_observed_at
+            result["electricity_tariff_observed_at"] = self._electricity_tariff_observed_at
         return result
 
     def get_notifications(self) -> list[dict[str, Any]]:
@@ -464,7 +513,12 @@ def _make_mqtt_client() -> Client:
 
 async def _subscribe_topics(client: Client, portal_id: str | None = None) -> None:
     """Subscribe first, then request a complete Venus publish for this session."""
-    for topic in ("inverter/state", "inverter/portal", "inverter/notifications"):
+    for topic in (
+        "inverter/state",
+        "inverter/portal",
+        "inverter/notifications",
+        "inverter/setpoint_override",
+    ):
         await client.subscribe(topic)
     if config.CAMERA_TOPIC:
         await client.subscribe(config.CAMERA_TOPIC)
@@ -492,8 +546,26 @@ async def _subscribe_portal_topics(client: Client, portal: str) -> None:
     await client.publish(f"R/{portal}/keepalive", "", qos=0)
 
 
+def _water_read_topics(portal: str) -> list[str]:
+    """Refresh only configured command authority, never write or full-republish."""
+    if (
+        not isinstance(portal, str)
+        or not portal
+        or any(c in "/+#" or c.isspace() or ord(c) < 32 for c in portal)
+    ):
+        return []
+    instances = {
+        instance
+        for instance in (config.WATER_PUMP_INSTANCE, config.WATER_VALVE_INSTANCE)
+        if isinstance(instance, int)
+        and not isinstance(instance, bool)
+        and 0 <= instance <= 2**31 - 1
+    }
+    return [f"R/{portal}/pump/{instance}/Mode" for instance in sorted(instances)]
+
+
 async def _keepalive_loop(client: Client, portal_getter) -> None:
-    """Maintain streaming without triggering full republishes every 45 seconds."""
+    """Maintain streaming and fresh water modes without full tree republishes."""
     while True:
         await asyncio.sleep(KEEPALIVE_INTERVAL_SECS)
         portal = portal_getter()
@@ -502,6 +574,10 @@ async def _keepalive_loop(client: Client, portal_getter) -> None:
                 await client.publish(
                     f"R/{portal}/keepalive", '{"keepalive-options":["suppress-republish"]}', qos=0
                 )
+                for topic in _water_read_topics(portal):
+                    if portal_getter() != portal:
+                        break
+                    await client.publish(topic, "", qos=0)
             except MqttError as exc:
                 logger.warning("Cerbo keepalive failed; retrying on next interval: %s", exc)
 
@@ -968,9 +1044,57 @@ async def index(request: Request, token: str | None = None):
     )
 
 
+def _websocket_origin_allowed(websocket: WebSocket | Request) -> bool:
+    """Refuse browser cross-site control even when the local dashboard is open."""
+    if websocket.headers.get("sec-fetch-site") not in (None, "same-origin", "none"):
+        return False
+    origins = websocket.headers.getlist("origin")
+    if not origins:
+        return True  # Native clients retain the existing token authentication.
+    if len(origins) != 1:
+        return False
+    origin = origins[0]
+    host = websocket.headers.get("host", "")
+    if (
+        not host
+        or len(origin) > 2048
+        or any(ord(c) <= 32 or ord(c) >= 127 or c == "\\" for c in origin + host)
+    ):
+        return False
+    return _same_origin_host(origin, host)
+
+
+def _same_origin_host(origin: str, host: str) -> bool:
+    try:
+        parsed = urlsplit(origin)
+        target = urlsplit(f"{parsed.scheme}://{host}")
+        if parsed.scheme not in ("http", "https"):
+            return False
+        if any(
+            part.username is not None
+            or part.password is not None
+            or not part.hostname
+            or part.path
+            or part.query
+            or part.fragment
+            for part in (parsed, target)
+        ):
+            return False
+        default_port = 443 if parsed.scheme == "https" else 80
+        return (parsed.hostname, parsed.port or default_port) == (
+            target.hostname,
+            target.port or default_port,
+        )
+    except ValueError:
+        return False
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates"""
+    if not _websocket_origin_allowed(websocket):
+        await websocket.close(code=4403, reason="cross-origin WebSocket denied")
+        return
     token = websocket.query_params.get("token")
     if DASHBOARD_SECRET and token != DASHBOARD_SECRET:
         await websocket.close(code=4401, reason="unauthorized")
@@ -999,6 +1123,13 @@ async def api_settings_get(request: Request):
 async def api_settings_post(request: Request):
     """Persist settings; section-visibility keys apply on next broadcast."""
     _verify_secret(request)
+    if not _websocket_origin_allowed(request):
+        raise HTTPException(status_code=403, detail="Cross-origin settings write denied")
+    if (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        != "application/json"
+    ):
+        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
     try:
         patch = await request.json()
     except Exception:
@@ -1010,7 +1141,7 @@ async def api_settings_post(request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
     websocket_handler.set_ui_settings(saved)
-    return {"ok": True, "settings": saved}
+    return {"ok": True, "settings": settings_store.load_settings(mask_secrets=True)}
 
 
 @app.get("/api/state")
