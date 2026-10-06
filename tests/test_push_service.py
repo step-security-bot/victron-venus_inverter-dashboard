@@ -1,14 +1,65 @@
 """Durable delivery, source cancellation and capability revocation at dispatch."""
 
 import asyncio
+import logging
 import time
 from unittest.mock import AsyncMock
 
 import pytest
+from py_vapid import VapidException
 
 from inverter_dashboard.push_events import DEFAULT_PREFERENCES, event_payload
-from inverter_dashboard.push_service import PushService
+from inverter_dashboard.push_service import PushService, _delivery_log_context, _log_provider_status
 from tests.test_push_transport import receiver
+
+
+@pytest.mark.parametrize(
+    "error,category",
+    [
+        (TimeoutError("private endpoint capability"), "timeout"),
+        (ImportError("private endpoint capability"), "dependency"),
+        (RuntimeError("private endpoint capability"), "unexpected"),
+        (VapidException("private endpoint capability"), "vapid"),
+        (ValueError("private endpoint capability"), "validation"),
+    ],
+)
+async def test_delivery_failure_diagnostics_are_bounded_and_secret_free(
+    service, caplog, error, category
+):
+    current, subscription = service
+    delivery = queue(current)
+    current.transport.send = AsyncMock(side_effect=error)
+    with caplog.at_level(logging.INFO, logger="inverter_dashboard.push_service"):
+        await current._deliver(delivery)
+    assert f"category={category} kind=native attempt=1" in caplog.text
+    assert "private endpoint capability" not in caplog.text
+    assert subscription["endpoint"] not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+async def test_provider_acceptance_logs_status_not_browser_delivery(service, caplog):
+    current, subscription = service
+    delivery = queue(current)
+    current.transport.send = AsyncMock(return_value=201)
+    with caplog.at_level(logging.INFO, logger="inverter_dashboard.push_service"):
+        await current._deliver(delivery)
+    assert "Web Push provider response status=201 kind=native attempt=1" in caplog.text
+    assert subscription["endpoint"] not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "bad_attempt,bad_status",
+    [(99, "private endpoint"), (True, True), (-1, 99), ("private endpoint", 600)],
+)
+def test_diagnostic_values_cannot_expand_into_private_payload_text(caplog, bad_attempt, bad_status):
+    kind, attempt = _delivery_log_context(
+        {"payload": {"kind": "private endpoint"}, "attempts": bad_attempt}
+    )
+    assert (kind, attempt) == ("unknown", "unknown")
+    with caplog.at_level(logging.INFO, logger="inverter_dashboard.push_service"):
+        _log_provider_status(bad_status, kind, attempt)
+    assert "category=invalid_status kind=unknown attempt=unknown" in caplog.text
+    assert "private endpoint" not in caplog.text
 
 
 @pytest.fixture

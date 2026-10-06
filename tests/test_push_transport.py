@@ -7,10 +7,11 @@ import socket
 
 import http_ece
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 
 from inverter_dashboard import push_transport
+from inverter_dashboard.config import Config
 from inverter_dashboard.push_store import PushStore
 from inverter_dashboard.push_transport import (
     PublicPushResolver,
@@ -125,7 +126,17 @@ async def test_resolver_supplies_validated_ip_to_connector(monkeypatch):
     assert addresses[0]["flags"] == socket.AI_NUMERICHOST
 
 
-async def test_real_encryption_and_hardened_transport_without_network(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "subject",
+    [
+        Config.model_fields["WEB_PUSH_SUBJECT"].default,
+        "mailto:notifications@example.com",
+        "https://example.com:8443/contact/team?project=dashboard",
+    ],
+)
+async def test_real_encryption_and_hardened_transport_without_network(
+    tmp_path, monkeypatch, subject
+):
     captured = {}
 
     class Response:
@@ -157,9 +168,9 @@ async def test_real_encryption_and_hardened_transport_without_network(tmp_path, 
     monkeypatch.setattr(push_transport.aiohttp, "ClientSession", Session)
     key, auth, subscription = receiver()
     store = PushStore(tmp_path)
-    transport = PushTransport(store, "mailto:notifications@example.com")
+    transport = PushTransport(store, subject)
     original_public = transport.public_key
-    assert PushTransport(store, "mailto:notifications@example.com").public_key == original_public
+    assert PushTransport(store, subject).public_key == original_public
     payload = {
         "title": "Battery alarm",
         "body": "Original event",
@@ -173,6 +184,27 @@ async def test_real_encryption_and_hardened_transport_without_network(tmp_path, 
     assert sent["headers"]["Content-Encoding"] == "aes128gcm"
     assert sent["headers"]["TTL"] == "299"
     assert sent["headers"]["Authorization"].startswith("vapid ")
+    token, public = sent["headers"]["Authorization"].removeprefix("vapid t=").split(",k=")
+    header, claims, signature = token.split(".")
+
+    def decode(value):
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+    assert json.loads(decode(header)) == {"typ": "JWT", "alg": "ES256"}
+    assert json.loads(decode(claims)) == {
+        "aud": "https://fcm.googleapis.com",
+        "sub": subject,
+        "exp": 1700003601,
+    }
+    assert public == original_public
+    raw_signature = decode(signature)
+    assert len(raw_signature) == 64
+    der_signature = utils.encode_dss_signature(
+        int.from_bytes(raw_signature[:32], "big"), int.from_bytes(raw_signature[32:], "big")
+    )
+    signing_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), decode(public))
+    signing_key.verify(der_signature, f"{header}.{claims}".encode(), ec.ECDSA(hashes.SHA256()))
+    assert transport.vapid.conf == {}  # No no-strict/global library validation switch.
     assert b"Battery alarm" not in sent["data"]
     clear = http_ece.decrypt(sent["data"], private_key=key, auth_secret=auth, version="aes128gcm")
     assert json.loads(clear) == payload

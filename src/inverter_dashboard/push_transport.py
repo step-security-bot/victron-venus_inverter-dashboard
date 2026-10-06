@@ -16,6 +16,7 @@ import aiohttp
 from aiohttp.abc import AbstractResolver
 
 from .push_store import PushStore
+from .push_subject import validate_push_subject
 
 EXACT_PUSH_HOSTS = frozenset({"fcm.googleapis.com", "updates.push.services.mozilla.com"})
 PUSH_SUFFIXES = (".push.apple.com", ".notify.windows.com")
@@ -139,6 +140,7 @@ class PushTransport:
     def __init__(self, store: PushStore, subject: str):
         from py_vapid import Vapid
 
+        self.subject = validate_push_subject(subject)
         raw = store.metadata("vapid_private_pem")
         if raw is None:
             if not store.new_database:
@@ -147,7 +149,6 @@ class PushTransport:
             key.generate_keys()
             raw = store.initialize_metadata("vapid_private_pem", key.private_pem())
         self.vapid = Vapid.from_pem(raw)
-        self.subject = subject
 
     @property
     def public_key(self) -> str:
@@ -159,6 +160,7 @@ class PushTransport:
         return base64.urlsafe_b64encode(public).decode().rstrip("=")
 
     async def send(self, subscription: dict, payload: dict, now: float) -> int:
+        from py_vapid.jwt import sign
         from pywebpush import WebPusher
 
         subscription = validate_subscription(subscription)
@@ -177,9 +179,18 @@ class PushTransport:
         if ttl <= 0:
             raise ValueError("Expired push event")
         encrypted = WebPusher(subscription).encode(data, content_encoding="aes128gcm")
-        headers = self.vapid.sign(
-            {"aud": f"https://{host}", "sub": self.subject, "exp": int(now) + 3600}
+        # py-vapid 1.9.4's convenience validator incorrectly rejects HTTPS paths.
+        # Keep strict URI validation and fixed audience/expiry here; its public
+        # signing primitive still owns JWT serialization and ES256 cryptography.
+        token = sign(
+            {
+                "aud": f"https://{host}",
+                "sub": validate_push_subject(self.subject),
+                "exp": int(now) + 3600,
+            },
+            self.vapid.private_key,
         )
+        headers = {"Authorization": f"vapid t={token},k={self.public_key}"}
         headers.update(
             {
                 "Content-Encoding": "aes128gcm",

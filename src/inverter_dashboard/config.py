@@ -8,6 +8,8 @@ import httpx
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .push_subject import validate_push_subject
+
 
 def validate_gateway_url(value: str) -> str:
     """Accept only an unambiguous HTTPS origin before attaching IGW credentials."""
@@ -104,20 +106,7 @@ class Config(BaseSettings):
     def _validate_push_settings(self):
         if self.WEB_PUSH_ENABLED and not self.WEB_PUSH_DATA_DIR:
             raise ValueError("WEB_PUSH_ENABLED requires WEB_PUSH_DATA_DIR")
-        subject = self.WEB_PUSH_SUBJECT
-        if len(subject) > 256 or any(ord(c) <= 32 or ord(c) >= 127 for c in subject):
-            raise ValueError("Invalid WEB_PUSH_SUBJECT")
-        parsed = urlsplit(subject)
-        if not (
-            (
-                parsed.scheme == "https"
-                and parsed.hostname
-                and not parsed.username
-                and not parsed.fragment
-            )
-            or (parsed.scheme == "mailto" and "@" in parsed.path and not parsed.query)
-        ):
-            raise ValueError("WEB_PUSH_SUBJECT must be an HTTPS contact URL or mailto address")
+        validate_push_subject(self.WEB_PUSH_SUBJECT)
         return self
 
     # Self-update settings

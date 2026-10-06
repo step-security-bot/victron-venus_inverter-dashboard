@@ -25,6 +25,45 @@ from .push_transport import PushTransport, endpoint_host, validate_subscription
 logger = logging.getLogger(__name__)
 
 
+def _failure_category(error: Exception) -> str:
+    """Fixed labels only: exception text can contain private endpoint capabilities."""
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, ImportError):
+        return "dependency"
+    return {
+        "ClientConnectorCertificateError": "tls",
+        "SSLCertVerificationError": "tls",
+        "ClientConnectorDNSError": "dns",
+        "gaierror": "dns",
+        "ClientConnectorError": "connection",
+        "ClientOSError": "connection",
+        "ConnectionResetError": "connection",
+        "ServerDisconnectedError": "connection",
+        "VapidException": "vapid",
+    }.get(type(error).__name__, "unexpected")
+
+
+def _delivery_log_context(delivery: dict) -> tuple[str, str]:
+    kind = delivery["payload"].get("kind")
+    if not isinstance(kind, str) or kind not in (*DEFAULT_PREFERENCES, "test"):
+        kind = "unknown"
+    attempt = delivery.get("attempts")
+    valid = isinstance(attempt, int) and not isinstance(attempt, bool) and 0 <= attempt <= 2
+    return kind, str(int(attempt) + 1) if valid else "unknown"
+
+
+def _log_provider_status(status: int, kind: str, attempt: str) -> None:
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        logger.info(
+            "Web Push provider response status=%d kind=%s attempt=%s", int(status), kind, attempt
+        )
+    else:
+        logger.warning(
+            "Web Push delivery failed category=invalid_status kind=%s attempt=%s", kind, attempt
+        )
+
+
 class PushRateLimit(ValueError):
     """Bounded subscription/test capacity reached."""
 
@@ -205,6 +244,7 @@ class PushService:
             self.fail()
 
     async def _deliver(self, delivery: dict) -> None:
+        log_kind, log_attempt = _delivery_log_context(delivery)
         epoch = delivery["epoch"]
         subscription = self.store.get(delivery["subscription_id"])
         kind = delivery["payload"]["kind"]
@@ -224,6 +264,7 @@ class PushService:
             status = await task
             if not self._owns_delivery(delivery):
                 return
+            _log_provider_status(status, log_kind, log_attempt)
             if status in (404, 410):
                 self.store.delete(subscription["id"])
             elif status == 429 or status >= 500:
@@ -232,9 +273,18 @@ class PushService:
             if asyncio.current_task().cancelling():
                 raise
         except (ValueError, TypeError):
-            logger.warning("Web Push delivery rejected by validation")
-        except Exception:
-            logger.warning("Web Push transport unavailable")
+            logger.warning(
+                "Web Push delivery failed category=validation kind=%s attempt=%s",
+                log_kind,
+                log_attempt,
+            )
+        except Exception as error:
+            logger.warning(
+                "Web Push delivery failed category=%s kind=%s attempt=%s",
+                _failure_category(error),
+                log_kind,
+                log_attempt,
+            )
             retry_at = time.time() + min(60, 5 * 2 ** delivery["attempts"])
         finally:
             self.inflight.pop(task, None)
