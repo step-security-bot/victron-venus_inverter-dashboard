@@ -186,6 +186,7 @@ def apply_platform_field(
             "date_time": None,
             "last_valid_date_time": None,
             "notif_type": None,
+            "push_type_known": False,
             "active": None,
             "acknowledged": None,
             "silenced": None,
@@ -207,6 +208,10 @@ def apply_platform_field(
             entry["last_valid_date_time"] = next_dt
         entry["date_time"] = next_dt
     elif field == "Type":
+        # OS pushes require an explicit numeric Type; preserve banner coercion.
+        entry["push_type_known"] = (
+            isinstance(value, (int, float)) and not isinstance(value, bool) and value in (0, 1, 2)
+        )
         entry["notif_type"] = _as_i64(value)
     elif field == "Active":
         entry["active"] = _as_bool(value)

@@ -23,6 +23,8 @@ RUN apk add --no-cache gcc libffi-dev musl-dev
 
 # Copy only what's needed for package installation with pyproject.toml
 COPY pyproject.toml uv.lock VERSION ./
+# Reviewed source-identical wheel preserves the no-source-build dependency policy.
+COPY vendor/http-ece/http_ece-1.2.1-py2.py3-none-any.whl ./vendor/http-ece/
 COPY src ./src
 # Package-data looks for VERSION next to the module in non-editable installs.
 RUN cp VERSION src/inverter_dashboard/VERSION

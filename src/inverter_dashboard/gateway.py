@@ -242,7 +242,9 @@ def _new_gateway_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECS, verify=True, follow_redirects=False)
 
 
-async def gateway_poll_loop(app_state, mqtt_state_emit, status_emit=None) -> None:
+async def gateway_poll_loop(
+    app_state, mqtt_state_emit, status_emit=None, *, is_current=lambda: True
+) -> None:
     """Background poller: fetch snapshot → apply → emit.
 
     ``app_state`` is the server AppState duck-type (gateway_* / mqtt_connected).
@@ -252,12 +254,16 @@ async def gateway_poll_loop(app_state, mqtt_state_emit, status_emit=None) -> Non
     delay = max(config.GATEWAY_POLL_INTERVAL, 0.5)
     logged_ok = False
     async with _new_gateway_client() as client:
-        while True:
+        while is_current():
             try:
                 snap = await fetch_snapshot(client)
+                if not is_current():
+                    return
                 app_state.gateway_connected = True
                 app_state.mqtt_connected = False
                 await mqtt_state_emit(snap)
+                if not is_current():
+                    return
                 app_state.gateway_polls += 1
                 if not logged_ok:
                     logger.info(
@@ -270,15 +276,21 @@ async def gateway_poll_loop(app_state, mqtt_state_emit, status_emit=None) -> Non
                 logger.info("IGW poller stopped")
                 raise
             except Exception as e:  # pylint: disable=broad-except
-                app_state.gateway_errors += 1
-                was = app_state.gateway_connected
-                app_state.gateway_connected = False
-                app_state.mqtt_connected = False
+                if not is_current():
+                    return
                 logged_ok = False
-                if was:
-                    logger.warning("IGW poll failed: %s", e)
-                    if status_emit is not None:
-                        await status_emit()
-                else:
-                    logger.debug("IGW poll failed: %s", e)
+                await _report_gateway_failure(app_state, status_emit, e)
             await asyncio.sleep(delay)
+
+
+async def _report_gateway_failure(app_state, status_emit, error) -> None:
+    app_state.gateway_errors += 1
+    was = app_state.gateway_connected
+    app_state.gateway_connected = False
+    app_state.mqtt_connected = False
+    if was:
+        logger.warning("IGW poll failed: %s", error)
+        if status_emit is not None:
+            await status_emit()
+    else:
+        logger.debug("IGW poll failed: %s", error)

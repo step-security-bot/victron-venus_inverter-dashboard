@@ -95,6 +95,31 @@ class Config(BaseSettings):
     # Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
     DASHBOARD_SECRET: str = ""
 
+    # Opt-in Web Push. State must live on a dedicated persistent private volume.
+    WEB_PUSH_ENABLED: bool = False
+    WEB_PUSH_DATA_DIR: str = ""
+    WEB_PUSH_SUBJECT: str = "https://github.com/victron-venus/inverter-dashboard"
+
+    @model_validator(mode="after")
+    def _validate_push_settings(self):
+        if self.WEB_PUSH_ENABLED and not self.WEB_PUSH_DATA_DIR:
+            raise ValueError("WEB_PUSH_ENABLED requires WEB_PUSH_DATA_DIR")
+        subject = self.WEB_PUSH_SUBJECT
+        if len(subject) > 256 or any(ord(c) <= 32 or ord(c) >= 127 for c in subject):
+            raise ValueError("Invalid WEB_PUSH_SUBJECT")
+        parsed = urlsplit(subject)
+        if not (
+            (
+                parsed.scheme == "https"
+                and parsed.hostname
+                and not parsed.username
+                and not parsed.fragment
+            )
+            or (parsed.scheme == "mailto" and "@" in parsed.path and not parsed.query)
+        ):
+            raise ValueError("WEB_PUSH_SUBJECT must be an HTTPS contact URL or mailto address")
+        return self
+
     # Self-update settings
     SELF_UPDATE_ENABLED: bool = False
     UPDATE_PIN: str = ""
@@ -146,7 +171,9 @@ class Config(BaseSettings):
     def GITHUB_RAW_URL(self) -> str:
         return f"https://raw.githubusercontent.com/{self.GITHUB_REPO}/main"
 
-    @field_validator("SELF_UPDATE_ENABLED", "MQTT_TLS", "GATEWAY_ENABLED", mode="before")
+    @field_validator(
+        "SELF_UPDATE_ENABLED", "MQTT_TLS", "GATEWAY_ENABLED", "WEB_PUSH_ENABLED", mode="before"
+    )
     @classmethod
     def _parse_bool(cls, v: str | bool) -> bool:
         if isinstance(v, bool):
@@ -174,6 +201,9 @@ GATEWAY_POLL_INTERVAL = config.GATEWAY_POLL_INTERVAL
 HOST = config.HOST
 WEB_PORT = config.WEB_PORT
 DASHBOARD_SECRET = config.DASHBOARD_SECRET
+WEB_PUSH_ENABLED = config.WEB_PUSH_ENABLED
+WEB_PUSH_DATA_DIR = config.WEB_PUSH_DATA_DIR
+WEB_PUSH_SUBJECT = config.WEB_PUSH_SUBJECT
 SELF_UPDATE_ENABLED = config.SELF_UPDATE_ENABLED
 UPDATE_PIN = config.UPDATE_PIN
 DEFAULT_POWER_MIN = config.DEFAULT_POWER_MIN

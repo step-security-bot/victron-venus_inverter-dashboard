@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "package": "http-ece",
+  "version": "1.2.1",
+  "upstreamRepository": "https://github.com/web-push-libs/encrypted-content-encoding",
+  "upstreamCommit": "dae9bc40bb2508a011c5f823adbf9c4e5d540e91",
+  "officialWheelAvailable": false,
+  "distributionCheck": "PyPI1.2.1 has only sdist; official GitHub release1.2.1 has zero assets",
+  "sourceDateEpoch": 1723075847,
+  "pythonBuildVersion": "3.12.14",
+  "rebuildScript": "scripts/rebuild_http_ece_wheel.py",
+  "runtimeSourceFiles": {
+    "http_ece/__init__.py": "2ddd0f18e1b0c287fe6bea53be7fbab1d950fe15b7184bb80ffabd98c40433f9"
+  },
+  "artifactSHA256": {
+    "LICENSE": "717363ac0c7f0883042868db171cfed1f4b423119249eac9bce5131291017ea8",
+    "http_ece-1.2.1.tar.gz": "8c6ab23116bbf6affda894acfd5f2ca0fb8facbcbb72121c11c75c33e7ce8cff",
+    "http_ece-1.2.1-py2.py3-none-any.whl": "ef871353055ce57475646f6c07bf3a12f2bbbea40e0648d3e9cadf1d48a53185"
+  },
+  "licenseSource": "https://raw.githubusercontent.com/web-push-libs/encrypted-content-encoding/dae9bc40bb2508a011c5f823adbf9c4e5d540e91/LICENSE",
+  "packagingOnlyChange": "Include upstream MIT LICENSE omitted from sdist; no runtime source changes"
+}

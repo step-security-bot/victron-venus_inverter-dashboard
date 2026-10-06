@@ -37,6 +37,9 @@ from .cerbo import (
     number,
 )
 from .config import DASHBOARD_SECRET, WEB_PORT
+from .push_api import install_push_api
+from .push_observer import PushObserver
+from .push_service import PushService
 from .version import VERSION, SelfUpdateDisabled, check_latest_version, download_and_update
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -395,6 +398,8 @@ class AppState:
     gateway_polls: int = 0
     gateway_errors: int = 0
     data_source: str = "none"  # "mqtt" | "igw" | "none"
+    source_generation: int = 0
+    source_stopped: asyncio.Event | None = None
 
     def __post_init__(self):
         if self.mqtt_tasks is None:
@@ -404,6 +409,8 @@ class AppState:
 # Module-level app state
 _app_state = AppState()
 websocket_handler.set_app_state(_app_state)
+_push_service: PushService | None = None
+_push_observer: PushObserver | None = None
 
 
 def _verify_secret(request: Request, token: str | None = None) -> None:
@@ -504,111 +511,172 @@ def _next_backoff(delay: float) -> float:
     return min(delay * 2, config.MQTT_RECONNECT_MAX)
 
 
+def _retire_source(owner) -> None:
+    owner.source_generation = getattr(owner, "source_generation", 0) + 1
+    stopped = getattr(owner, "source_stopped", None)
+    if stopped is not None:
+        stopped.set()
+
+
+async def _wait_for_source_retry(stopped: asyncio.Event, delay: float) -> None:
+    """Wake immediately on retirement, otherwise apply the reconnect backoff."""
+    try:
+        await asyncio.wait_for(stopped.wait(), delay)
+    except TimeoutError:
+        # Reaching the backoff deadline is the normal signal to reconnect.
+        pass
+
+
+def _new_source_state(source: str):
+    """Capture a source owner; late work can never target a replacement state."""
+    owner = _app_state
+    _retire_source(owner)
+    owner.source_stopped = asyncio.Event()
+    generation = owner.source_generation
+    ms = MqttState()
+    owner.mqtt_state = ms
+    owner.data_source = source
+
+    def current() -> bool:
+        return (
+            _app_state is owner
+            and owner.source_generation == generation
+            and owner.mqtt_state is ms
+            and owner.data_source == source
+        )
+
+    async def emit() -> None:
+        if current():
+            await websocket_handler.broadcast_state()
+
+    ms.set_state_callback(emit)
+    websocket_handler.set_mqtt_state(ms)
+    return owner, ms, current, owner.source_stopped
+
+
 def _start_gateway_client():
     """Poll inverter-gateway /v1/snapshot (no Cerbo MQTT client)."""
-
-    _app_state.mqtt_state = MqttState()
-    _app_state.mqtt_client = None
-    _app_state.data_source = "igw"
-    _app_state.mqtt_state.set_state_callback(websocket_handler.broadcast_state)
-    websocket_handler.set_mqtt_state(_app_state.mqtt_state)
+    owner, ms, current, _stopped = _new_source_state("igw")
+    owner.mqtt_client = None
     if config.CERBO_PORTAL_ID:
-        _app_state.mqtt_state._portal_id = config.CERBO_PORTAL_ID
+        ms._portal_id = config.CERBO_PORTAL_ID
 
     async def _apply_and_emit(snap: dict[str, Any]) -> None:
-        ms = _app_state.mqtt_state
-        if ms is not None:
-            gateway.apply_snapshot(ms, snap)
-            await ms._emit()
+        if not current():
+            return
+        gateway.apply_snapshot(ms, snap)
+        if _push_observer is not None and current():
+            _push_observer.snapshot(ms)
+        await ms._emit()
 
     async def _status_and_emit() -> None:
-        ms = _app_state.mqtt_state
-        if ms is not None and not _app_state.gateway_connected:
+        if not current():
+            return
+        if not owner.gateway_connected:
             ms.clear_daemon_state()
-        await websocket_handler.broadcast_state()
+            if _push_service is not None:
+                _push_service.disconnect("igw", ms)
+        await ms._emit()
 
     task = asyncio.create_task(
-        gateway.gateway_poll_loop(_app_state, _apply_and_emit, _status_and_emit)
+        gateway.gateway_poll_loop(owner, _apply_and_emit, _status_and_emit, is_current=current)
     )
-    _app_state.mqtt_tasks.append(task)
+    owner.mqtt_tasks.append(task)
 
 
 def _start_mqtt_client():
-    """Start MQTT client connection and message loop with auto-reconnect."""
-    _app_state.mqtt_state = MqttState()
-    _app_state.mqtt_client = _make_mqtt_client()
-    _app_state.data_source = "mqtt"
-    _app_state.mqtt_state.set_state_callback(websocket_handler.broadcast_state)
-    websocket_handler.set_mqtt_state(_app_state.mqtt_state)
+    """Start an owner-bound MQTT client loop with auto-reconnect."""
+    owner, ms, current, stopped = _new_source_state("mqtt")
+    owner.mqtt_client = _make_mqtt_client()
 
     async def mqtt_connect_and_loop():
         delay = max(config.MQTT_RECONNECT_MIN, 0.1)
-        while True:
+        while current():
             keepalive_task: asyncio.Task | None = None
+            client = owner.mqtt_client
             try:
-                async with _app_state.mqtt_client:
-                    _app_state.mqtt_connected = True
+                async with client:
+                    if not current() or owner.mqtt_client is not client:
+                        break
+                    owner.mqtt_connected = True
                     logger.info("Connected to MQTT broker")
-                    ms = _app_state.mqtt_state
-                    if ms is None:
-                        raise RuntimeError("MQTT state not initialized")
 
-                    async def _on_portal(portal: str) -> None:
-                        client = _app_state.mqtt_client
-                        if client is not None:
-                            await _subscribe_portal_topics(client, portal)
+                    async def _on_portal(portal: str, session_client=client) -> None:
+                        if current() and owner.mqtt_client is session_client:
+                            await _subscribe_portal_topics(session_client, portal)
 
                     ms.set_portal_callback(_on_portal)
                     ms.clear_daemon_state()
                     ms.clear_cerbo_state()
-                    await _subscribe_topics(_app_state.mqtt_client, ms._portal_id or None)
+                    if _push_service is not None:
+                        _push_service.connect("mqtt", ms, force=True)
+                    await _subscribe_topics(client, ms._portal_id or None)
+                    if not current():
+                        break
                     logger.info("Subscribed to MQTT topics")
                     keepalive_task = asyncio.create_task(
-                        _keepalive_loop(
-                            _app_state.mqtt_client,
-                            lambda: (
-                                _app_state.mqtt_state._portal_id if _app_state.mqtt_state else ""
-                            ),
-                        )
+                        _keepalive_loop(client, lambda: ms._portal_id if current() else "")
                     )
                     delay = max(config.MQTT_RECONNECT_MIN, 0.1)
-                    async for message in _app_state.mqtt_client.messages:
+                    async for message in client.messages:
+                        if not current() or owner.mqtt_client is not client:
+                            break
                         await ms.on_message(
                             message.topic.value, message.payload, retained=bool(message.retain)
                         )
-            except asyncio.CancelledError:
-                raise
+                        if (
+                            _push_observer is not None
+                            and current()
+                            and owner.mqtt_client is client
+                            and owner.mqtt_connected
+                        ):
+                            _push_observer.mqtt(
+                                ms,
+                                message.topic.value,
+                                retained=bool(message.retain),
+                                payload=message.payload,
+                            )
             except MqttError:
-                _app_state.mqtt_reconnects += 1
+                if not current():
+                    break
+                owner.mqtt_reconnects += 1
                 logger.warning(
                     "MQTT connection lost — reconnecting in %.1fs (reconnect #%d)",
                     delay,
-                    _app_state.mqtt_reconnects,
+                    owner.mqtt_reconnects,
                 )
                 if gateway.dual_path_enabled() and gateway.gateway_configured():
                     await _failover_to_igw("MQTT connection lost")
-                    return
+                    break
             except Exception:  # pylint: disable=broad-except
-                _app_state.mqtt_reconnects += 1
+                if not current():
+                    break
+                owner.mqtt_reconnects += 1
                 logger.exception("Unexpected error in MQTT loop — retrying in %.1fs", delay)
                 if gateway.dual_path_enabled() and gateway.gateway_configured():
                     await _failover_to_igw("MQTT loop error")
-                    return
+                    break
             finally:
-                _app_state.mqtt_connected = False
-                if _app_state.mqtt_state is not None:
-                    _app_state.mqtt_state.clear_daemon_state()
-                    _app_state.mqtt_state.clear_cerbo_state()
-                    await _app_state.mqtt_state._emit()
+                if current() and owner.mqtt_client is client:
+                    owner.mqtt_connected = False
+                    if _push_service is not None:
+                        _push_service.disconnect("mqtt", ms)
+                    ms.clear_daemon_state()
+                    ms.clear_cerbo_state()
+                    await ms._emit()
                 if keepalive_task is not None:
                     keepalive_task.cancel()
                     await asyncio.gather(keepalive_task, return_exceptions=True)
-            await asyncio.sleep(delay)
+            if not current():
+                break
+            await _wait_for_source_retry(stopped, delay)
+            if not current():
+                break
             delay = _next_backoff(delay)
-            _app_state.mqtt_client = _make_mqtt_client()
+            owner.mqtt_client = _make_mqtt_client()
 
     mqtt_task = asyncio.create_task(mqtt_connect_and_loop())
-    _app_state.mqtt_tasks.append(mqtt_task)
+    owner.mqtt_tasks.append(mqtt_task)
 
 
 def _start_ha_polling():
@@ -632,6 +700,9 @@ def _start_version_check():
 async def _shutdown_tasks(ha_task, version_task=None):
     """Cancel and await all background tasks."""
     gateway.invalidate_ess_commands()
+    _retire_source(_app_state)
+    if _push_service is not None:
+        _push_service.disconnect()
     tasks = [task for task in (ha_task, version_task) if task is not None]
     tasks.extend(_app_state.mqtt_tasks)
     _app_state.mqtt_tasks.clear()
@@ -660,6 +731,9 @@ async def _cancel_data_source_tasks() -> None:
     can replace sibling transports without cancelling itself.
     """
     gateway.invalidate_ess_commands()
+    _retire_source(_app_state)
+    if _push_service is not None:
+        _push_service.disconnect()
     current = asyncio.current_task()
     tasks = [t for t in _app_state.mqtt_tasks if t is not current]
     _app_state.mqtt_tasks.clear()
@@ -769,12 +843,17 @@ async def _select_and_start_data_source() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Application lifespan handler"""
+    global _push_service, _push_observer
     # Startup
     ha_client.load_config()
     settings_store.apply_connection_overrides()  # file wins over env; CLI applied later wins over file
     websocket_handler.set_ui_settings(settings_store.load_settings())
     ha_task = version_task = None
     try:
+        if config.WEB_PUSH_ENABLED:
+            _push_service = PushService(Path(config.WEB_PUSH_DATA_DIR), config.WEB_PUSH_SUBJECT)
+            _push_observer = PushObserver(_push_service)
+            _push_service.start()
         await _select_and_start_data_source()
         ha_task = _start_ha_polling()
         version_task = _start_version_check()
@@ -783,10 +862,16 @@ async def lifespan(_app: FastAPI):
         try:
             await _shutdown_tasks(ha_task, version_task)
         finally:
-            await _shutdown_mqtt_client()
+            try:
+                await _shutdown_mqtt_client()
+            finally:
+                if _push_service is not None:
+                    await _push_service.close()
+                _push_service = _push_observer = None
 
 
 app = FastAPI(title="Inverter Dashboard", lifespan=lifespan)
+install_push_api(app, lambda: _push_service, _verify_secret)
 
 
 def _spa_static_candidates() -> list[Path]:
@@ -825,6 +910,33 @@ def _mount_vue_dist():
 
 
 _mount_vue_dist()
+
+
+@app.get(
+    "/notifications-sw.js", responses={404: {"description": "Notification resource not built"}}
+)
+@app.get(
+    "/manifest.webmanifest", responses={404: {"description": "Notification resource not built"}}
+)
+@app.get(
+    "/notification-icon.svg", responses={404: {"description": "Notification resource not built"}}
+)
+async def notification_static(request: Request):
+    """Only these inert root-scoped resources are exempt from dashboard auth."""
+    names = {
+        "/notifications-sw.js": "application/javascript",
+        "/manifest.webmanifest": "application/manifest+json",
+        "/notification-icon.svg": "image/svg+xml",
+    }
+    root = _resolve_spa_root()
+    target = root / request.url.path[1:] if root is not None else None
+    if target is None or not target.is_file():
+        raise HTTPException(status_code=404, detail="Notification resource not built")
+    return Response(
+        target.read_bytes(),
+        media_type=names[request.url.path],
+        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+    )
 
 
 # Routes

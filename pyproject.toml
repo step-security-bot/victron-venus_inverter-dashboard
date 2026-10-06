@@ -17,6 +17,11 @@ dependencies = [
     "httpx>=0.28.1",
     "aiofiles>=25.1.0",
     "pydantic-settings>=2.0",
+    "pywebpush==2.5.0",
+    "aiohttp>=3.14.4",
+    "cryptography>=50.0.1",
+    "py-vapid>=1.9.4",
+    "http-ece==1.2.1",
 ]
 
 [project.scripts]
@@ -81,3 +86,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E402"]
+
+[tool.uv.sources]
+http-ece = { path = "vendor/http-ece/http_ece-1.2.1-py2.py3-none-any.whl" }

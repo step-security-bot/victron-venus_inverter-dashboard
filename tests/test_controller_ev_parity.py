@@ -335,7 +335,8 @@ async def test_gateway_connection_loss_immediately_clears_controller_state(monke
     broadcast = AsyncMock()
     monkeypatch.setattr(ws, "broadcast_state", broadcast)
 
-    async def poll(app_state, apply_snapshot, status_emit):
+    async def poll(app_state, apply_snapshot, status_emit, *, is_current):
+        assert is_current()
         await apply_snapshot({"inverter": {"booleans": {"only_charging": True}}})
         assert app_state.mqtt_state.controller_available()
         app_state.gateway_connected = False

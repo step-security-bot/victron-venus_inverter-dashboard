@@ -588,3 +588,79 @@ For issues specific to:
 - **Home Assistant integration**: Validate token and entity availability
 - **Docker deployment**: Review container logs and volume mounts
 - **This project**: Open an issue in this repository
+
+
+## Opt-in system notifications
+
+The dashboard can deliver encrypted Web Push notifications without an open tab.
+Enable `WEB_PUSH_ENABLED=true` and set `WEB_PUSH_DATA_DIR` to a dedicated persistent
+private directory. `WEB_PUSH_SUBJECT` defaults to this project's HTTPS repository
+URL; a contact `mailto:` URI is also accepted. Missing directory configuration is
+an explicit configuration error. An inaccessible, locked or corrupt store instead
+reports Web Push unavailable while normal telemetry continues. It never resets a
+store or silently generates a replacement VAPID key for an existing store.
+
+Use a single application process/replica with a persistent local filesystem and
+Recreate rollout strategy. The directory is mode 0700 and store/lock files mode 0600;
+an exclusive process lock prevents duplicate senders. Preserve this directory
+across upgrades, including the VAPID identity and browser subscriptions. Do not
+share it over a network filesystem or expose it through static file serving.
+The server bounds subscribers to 64, dedupe entries to 4096 and pending deliveries
+to 1024. Deleting a subscription or updating preferences discards its pending work.
+
+In notification settings, **Enable** requires a direct browser permission gesture
+and confirmation that the server registered the subscription. The explicit test
+button reports **queued**, not delivered. Notifications require a secure context
+and a browser/platform that supports Web Push; iPhone support requires using an
+installed Home Screen web app. Browser permission and OS delivery remain under
+the user's control. Existing in-app warning banners remain independent.
+
+Native warnings retain the original Victron/control occurrence time. Current
+alerts are silently primed on first connection and reconnect; unknown, old or
+future timestamps do not create new system notifications. Fresh selected charger
+power transitions (>10W), pump/valve states (0 or 1) and actual native battery SoC
+crossing 20% can also notify after a baseline in the same connection. Prior samples
+expire after 30 seconds. MQTT retained samples clear these baselines and an initial
+10 second hydration period is silent. Voltage-derived SoC and near-zero grid watts
+never create notification events. Closed connection epochs cancel their queued
+and in-flight work; provider delivery already accepted cannot be recalled.
+
+All notification APIs use the existing dashboard secret policy. Mutations require
+JSON and a same-origin HTTPS Origin matching the ingress-preserved Host; forwarded
+host/proto values cannot grant access. The browser sends its dashboard token only
+in the Authorization header and subscription capability only in the JSON body.
+No endpoint, encryption key or private VAPID material is returned in diagnostics.
+Outbound delivery uses [pywebpush](https://pypi.org/project/pywebpush/2.5.0/) for
+standard encryption and VAPID, a public-IP-pinned HTTPS transport with verified
+TLS, no proxy/redirects, and a10 second timeout. Supported provider authorities are
+`fcm.googleapis.com`, `updates.push.services.mozilla.com`, named hosts under
+`.push.apple.com`, and named hosts under `.notify.windows.com`; unknown providers
+are rejected. Each event expires 300 seconds after its source time, has at most
+three delivery attempts, and 404/410 removes the expired subscription.
+
+The root service worker, web manifest and notification icon are narrowly public
+static resources with no-cache headers. The worker has no fetch handler, command
+actions or asset cache. A notification click opens the dashboard root and does
+not acknowledge an alarm or control any device.
+
+The server-side private store is currently supported on Unix hosts. On Windows,
+the backend reports Web Push unavailable and continues normal dashboard operation;
+Windows browsers can still subscribe to a supported Unix-hosted dashboard.
+
+The only dependency without an official wheel is `http-ece==1.2.1`. Its reviewed
+pure-Python wheel and original source archive are under `vendor/http-ece/` with
+MIT license, exact source/runtime hashes and provenance. `uv.lock` selects that
+wheel without weakening `--no-build`. To reproduce it offline, download the
+hash-pinned build tool wheels listed in `upstream-inputs.json` into a wheelhouse,
+then use the resolved Python 3.12 executable (3.12.14 was used for qualification):
+
+```sh
+python3.12 scripts/rebuild_http_ece_wheel.py --wheelhouse /path/to/wheelhouse --output-name rebuilt
+```
+
+The wheel is written beneath `build/vendor-wheels/rebuilt/`; output names cannot
+contain path separators or traverse symlinks.
+
+The build fixes `SOURCE_DATE_EPOCH`, installs only hash-checked offline tools,
+and compares every packaged runtime Python file with the upstream source. The
+upstream MIT license, omitted from its sdist, is included as wheel metadata.
