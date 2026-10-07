@@ -22,7 +22,7 @@ jobs:
         run: bash scripts/ci.sh
       - name: Upload coverage
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dashboard-python-coverage
           path: coverage.xml
@@ -30,7 +30,7 @@ jobs:
 
       - name: 'Export coverage: python'
         id: export_coverage_python
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage-python-${{ github.run_attempt }}
           path: coverage.xml
@@ -111,7 +111,7 @@ jobs:
 
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: integration-test-report
           path: report.html

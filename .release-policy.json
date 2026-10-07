@@ -64,7 +64,7 @@
   },
   "single_entry_ci": true,
   "coverage": {
-    "toolkit_ref": "5f5ff3846aacee0edfbeadeb316ee68525e9208d",
+    "toolkit_ref": "062d60e8892d4a97e11f5985d0914d5b19fcd24e",
     "reports": [
       {
         "name": "python",
