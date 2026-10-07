@@ -91,6 +91,7 @@ CERBO_OWNED_KEYS = frozenset(
         "setpoint",
         "inverter_state",
         "ev_power",
+        "car_charging_power",
         "car_soc",
         "ev_charging_kw",
         "ev_charging_power",
@@ -448,7 +449,7 @@ class CerboOverlayMixin:
                 keys.add("setpoint")
         for service, leaf, fields in (
             ("ev", "Soc", ("car_soc",)),
-            ("ev", "Ac/Power", ("ev_power",)),
+            ("ev", "Ac/Power", ("ev_power", "car_charging_power")),
             ("evcharger", "Ac/Power", ("ev_charging_kw", "ev_charging_power")),
             ("evcharger", "Soc", ("car_soc",)),
             ("tank", "Level", ("water_level",)),
@@ -732,7 +733,9 @@ class CerboOverlayMixin:
             fallback_soc = charger.get("Soc") if config.EV_INSTANCE is None else None
             out["car_soc"] = _first_number(vehicle.get("Soc"), fallback_soc)
         if "Ac/Power" in vehicle:
-            out["ev_power"] = number(vehicle["Ac/Power"])
+            vehicle_power = number(vehicle["Ac/Power"])
+            out["ev_power"] = vehicle_power
+            out["car_charging_power"] = vehicle_power
         if "Ac/Power" in charger:
             power = number(charger["Ac/Power"])
             out["ev_charging_power"] = power

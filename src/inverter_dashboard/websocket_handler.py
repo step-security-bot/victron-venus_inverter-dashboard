@@ -211,6 +211,7 @@ class InverterState(BaseModel):
     # EV
     ev_charging_kw: float | int | None = None
     ev_power: float | int | None = None
+    car_charging_power: float | int | None = None
     car_soc: float | int | None = None
     ev_charging_power: float | int | None = None
     ev_present: bool | None = None
